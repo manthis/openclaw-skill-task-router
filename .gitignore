@@ -1,0 +1,21 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Secrets - NEVER commit these
+*.env
+.env.*
+secrets/
+credentials/
+**/tokens.json
+**/api-keys.json
+
+# Local overrides
+*.local
+*.local.*

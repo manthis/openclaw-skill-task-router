@@ -1,0 +1,32 @@
+{
+  "execute_direct": {
+    "keywords": ["read", "check", "list", "show", "get", "find", "what", "status", "cat", "look"],
+    "max_duration_seconds": 10,
+    "patterns": ["file read", "simple query", "status check", "quick answer", "single command"]
+  },
+  "spawn_sonnet": {
+    "keywords": ["write", "create", "format", "search", "analyze", "summarize", "compile", "draft", "organize", "research"],
+    "model": "anthropic/claude-sonnet-4-5",
+    "duration_range": [10, 300],
+    "timeout_default": 600,
+    "estimated_cost": "medium",
+    "patterns": ["multi-step", "data processing", "content generation", "web search", "email", "documentation"]
+  },
+  "spawn_opus": {
+    "keywords": ["build", "fix", "debug", "audit", "refactor", "deploy", "create skill", "implement", "architect", "migrate"],
+    "model": "anthropic/claude-opus-4-6",
+    "duration_range": [300, null],
+    "timeout_default": 1800,
+    "estimated_cost": "high",
+    "patterns": ["git operations", "code changes", "complex workflow", "npm", "build", "test suite", "security", "multi-file"]
+  },
+  "spawn_codex": {
+    "fallback": true,
+    "keywords": ["fallback", "general"],
+    "model": "anthropic/claude-codex",
+    "duration_range": [10, null],
+    "timeout_default": 600,
+    "estimated_cost": "low",
+    "patterns": []
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "models": {
+    "sonnet": {
+      "id": "anthropic/claude-sonnet-4-5",
+      "display_name": "Sonnet",
+      "cost_tier": "medium",
+      "strengths": ["content", "analysis", "formatting", "search"],
+      "default_timeout": 600
+    },
+    "opus": {
+      "id": "anthropic/claude-opus-4-6",
+      "display_name": "Opus",
+      "cost_tier": "high",
+      "strengths": ["code", "debugging", "architecture", "security"],
+      "default_timeout": 1800
+    },
+    "codex": {
+      "id": "anthropic/claude-codex",
+      "display_name": "Codex",
+      "cost_tier": "low",
+      "strengths": ["general", "simple"],
+      "default_timeout": 600
+    }
+  },
+  "protection_mode": {
+    "force_model": "sonnet",
+    "state_file": "memory/claude-usage-state.json",
+    "allow_override": true
+  }
+}
