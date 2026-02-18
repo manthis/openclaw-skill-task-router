@@ -17,6 +17,7 @@ TASK=""
 JSON_OUTPUT=false
 CHECK_PROTECTION=false
 DRY_RUN=false
+USE_NOTIFY=true
 PROTECTION_STATE_FILE="${OPENCLAW_WORKSPACE:-$HOME/.openclaw/workspace}/memory/claude-usage-state.json"
 
 # Colors
@@ -35,6 +36,8 @@ Options:
   --json                  Output as JSON
   --check-protection      Check if protection mode is active
   --dry-run               Simulation mode (don't execute anything)
+  --use-notify            Use spawn-notify.sh instead of sessions_spawn (default: true)
+  --no-notify             Use raw sessions_spawn (disable spawn-notify)
   -h, --help              Show this help
 
 Environment:
@@ -57,6 +60,8 @@ while [[ $# -gt 0 ]]; do
         --json) JSON_OUTPUT=true; shift ;;
         --check-protection) CHECK_PROTECTION=true; shift ;;
         --dry-run) DRY_RUN=true; shift ;;
+        --use-notify) USE_NOTIFY=true; shift ;;
+        --no-notify) USE_NOTIFY=false; shift ;;
         -h|--help) usage ;;
         *) echo "Unknown option: $1"; usage ;;
     esac
@@ -236,7 +241,11 @@ route_task() {
     
     local command=""
     if [[ "$recommendation" == "spawn" ]]; then
-        command="sessions_spawn --task '${TASK}' --model '${model}' --label '${label}'"
+        if [[ "$USE_NOTIFY" == "true" ]]; then
+            command="spawn-notify.sh --task '${TASK}' --model '${model}' --label '${label}' --timeout ${timeout}"
+        else
+            command="sessions_spawn --task '${TASK}' --model '${model}' --label '${label}'"
+        fi
     fi
     
     # Output
