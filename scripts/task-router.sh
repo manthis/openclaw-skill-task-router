@@ -10,7 +10,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || realpath "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")" && pwd)"
 LIB_DIR="${SCRIPT_DIR}/../lib"
 RULES_FILE="${LIB_DIR}/decision-rules.json"
-MODEL_FILE="${LIB_DIR}/model-config.json"
 
 # Defaults
 TASK=""
