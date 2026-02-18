@@ -95,26 +95,44 @@ is_protection_mode() {
     echo "false"
 }
 
-# Count keyword matches for a category
+# Count weighted keyword matches for a category
 count_matches() {
     local category="$1"
     local count=0
     
-    # Check keywords
-    local keywords
-    keywords=$(jq -r ".${category}.keywords[]" "$RULES_FILE" 2>/dev/null)
-    while IFS= read -r keyword; do
-        if [[ "$TASK_LOWER" == *"$keyword"* ]]; then
-            ((count++))
-        fi
-    done <<< "$keywords"
+    # Check keywords with weights (support multiple tiers)
+    for tier in "keywords_high" "keywords_medium" "keywords_low" "keywords"; do
+        local weight_key="${tier/keywords/keyword_weight}"
+        # Map tier to weight key
+        case "$tier" in
+            keywords_high) weight_key="keyword_weight_high" ;;
+            keywords_medium) weight_key="keyword_weight_medium" ;;
+            keywords_low) weight_key="keyword_weight_low" ;;
+            keywords) weight_key="keyword_weight" ;;
+        esac
+        
+        local weight
+        weight=$(jq -r ".${category}.${weight_key} // 1" "$RULES_FILE" 2>/dev/null)
+        
+        local keywords
+        keywords=$(jq -r ".${category}.${tier}[]?" "$RULES_FILE" 2>/dev/null)
+        [[ -z "$keywords" ]] && continue
+        
+        while IFS= read -r keyword; do
+            [[ -z "$keyword" ]] && continue
+            # Match as whole word using word boundaries
+            if echo "$TASK_LOWER" | grep -qwi "$keyword"; then
+                ((count += weight))
+            fi
+        done <<< "$keywords"
+    done
     
     # Check patterns
     local patterns
-    patterns=$(jq -r ".${category}.patterns[]" "$RULES_FILE" 2>/dev/null)
+    patterns=$(jq -r ".${category}.patterns[]?" "$RULES_FILE" 2>/dev/null)
     while IFS= read -r pattern; do
         if [[ -n "$pattern" && "$TASK_LOWER" == *"$pattern"* ]]; then
-            ((count += 2))  # Patterns weigh more
+            ((count += 3))  # Patterns weigh more
         fi
     done <<< "$patterns"
     
@@ -133,8 +151,8 @@ estimate_complexity() {
         complexity="medium"
     fi
     
-    # Check for complexity indicators
-    if echo "$TASK_LOWER" | grep -qE "(and then|after that|multiple|several|all |every|each|publish|deploy|github|npm)"; then
+    # Check for complexity indicators (only strong signals)
+    if echo "$TASK_LOWER" | grep -qE "(and then|after that|multiple|several|every|each|publish|deploy|github|npm)"; then
         complexity="complex"
     fi
     
@@ -176,8 +194,12 @@ route_task() {
     local cost="medium"
     local protection_override=false
     
+    # If both direct and spawn keywords are present, spawn wins (mixed intent = action needed)
+    local spawn_total=$((sonnet_score + opus_score))
+    
     # Decision logic
-    if [[ $direct_score -gt $sonnet_score && $direct_score -gt $opus_score && "$complexity" == "simple" ]]; then
+    # Direct execution wins if it has highest score, no significant spawn keywords, AND (simple complexity OR dominant score)
+    if [[ $direct_score -gt $sonnet_score && $direct_score -gt $opus_score && $spawn_total -lt 5 && ( "$complexity" == "simple" || $direct_score -ge 10 ) ]]; then
         recommendation="execute_direct"
         model=""
         model_name=""

@@ -1,11 +1,15 @@
 {
   "execute_direct": {
-    "keywords": ["read", "check", "list", "show", "get", "find", "what", "status", "cat", "look"],
+    "keywords_high": ["list", "show", "check", "status", "get", "display", "view", "find"],
+    "keywords_low": ["read", "what", "cat", "look"],
+    "keyword_weight_high": 10,
+    "keyword_weight_low": 3,
     "max_duration_seconds": 10,
     "patterns": ["file read", "simple query", "status check", "quick answer", "single command"]
   },
   "spawn_sonnet": {
-    "keywords": ["write", "create", "format", "search", "analyze", "summarize", "compile", "draft", "organize", "research"],
+    "keywords_high": ["write", "create", "format", "search", "analyze", "summarize", "compile", "draft", "organize", "research"],
+    "keyword_weight": 5,
     "model": "anthropic/claude-sonnet-4-5",
     "duration_range": [10, 300],
     "timeout_default": 600,
@@ -13,7 +17,10 @@
     "patterns": ["multi-step", "data processing", "content generation", "web search", "email", "documentation"]
   },
   "spawn_opus": {
-    "keywords": ["build", "fix", "debug", "audit", "refactor", "deploy", "create skill", "implement", "architect", "migrate"],
+    "keywords_medium": ["create", "build", "fix", "debug", "audit"],
+    "keywords_high": ["deploy", "refactor", "migrate", "publish", "implement", "architect"],
+    "keyword_weight_medium": 5,
+    "keyword_weight_high": 10,
     "model": "anthropic/claude-opus-4-6",
     "duration_range": [300, null],
     "timeout_default": 1800,

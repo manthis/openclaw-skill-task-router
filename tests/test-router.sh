@@ -109,6 +109,30 @@ cost=$(echo "$result" | jq -r '.estimated_cost')
 assert_contains "Cost is set" "$cost" "low medium high"
 
 echo ""
+echo "=== Priority Keyword Detection Tests ==="
+echo ""
+
+# Test 13: "List all active subagents" → execute_direct
+result=$("$ROUTER" --task "List all active subagents" --json)
+rec=$(echo "$result" | jq -r '.recommendation')
+assert_eq "List all active subagents → execute_direct" "execute_direct" "$rec"
+
+# Test 14: "Show current status" → execute_direct
+result=$("$ROUTER" --task "Show current status" --json)
+rec=$(echo "$result" | jq -r '.recommendation')
+assert_eq "Show current status → execute_direct" "execute_direct" "$rec"
+
+# Test 15: "Check if service is running" → execute_direct
+result=$("$ROUTER" --task "Check if service is running" --json)
+rec=$(echo "$result" | jq -r '.recommendation')
+assert_eq "Check if service is running → execute_direct" "execute_direct" "$rec"
+
+# Test 16: "List and fix all bugs" → spawn (fix outweighs list)
+result=$("$ROUTER" --task "List and fix all bugs" --json)
+rec=$(echo "$result" | jq -r '.recommendation')
+assert_eq "List and fix all bugs → spawn" "spawn" "$rec"
+
+echo ""
 echo "=== Results ==="
 echo -e "Passed: ${GREEN}${PASSED}${NC}"
 echo -e "Failed: ${RED}${FAILED}${NC}"
