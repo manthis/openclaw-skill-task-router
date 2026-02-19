@@ -1,58 +1,14 @@
 #!/bin/bash
-# task-router.sh — Intelligent task routing for OpenClaw orchestration
+# task-router.sh — Fast task routing for OpenClaw orchestration
 # Usage: task-router.sh --task "description" [--json] [--check-protection] [--dry-run]
-#
-# Analyzes a task description and recommends whether to execute directly
-# or spawn a sub-agent, which model to use, and generates the command.
-
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || realpath "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")" && pwd)"
-LIB_DIR="${SCRIPT_DIR}/../lib"
-RULES_FILE="${LIB_DIR}/decision-rules.json"
-
-# Defaults
-TASK=""
-JSON_OUTPUT=false
-CHECK_PROTECTION=false
-DRY_RUN=false
-USE_NOTIFY=true
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RULES_FILE="${SCRIPT_DIR}/../lib/decision-rules.json"
 PROTECTION_STATE_FILE="${OPENCLAW_WORKSPACE:-$HOME/.openclaw/workspace}/memory/claude-usage-state.json"
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+TASK="" JSON_OUTPUT=false CHECK_PROTECTION=false DRY_RUN=false USE_NOTIFY=true
 
-usage() {
-    cat <<EOF
-Usage: task-router.sh --task "description" [OPTIONS]
-
-Options:
-  --task <description>    Task to analyze (required)
-  --json                  Output as JSON
-  --check-protection      Check if protection mode is active
-  --dry-run               Simulation mode (don't execute anything)
-  --use-notify            Use spawn-notify.sh instead of sessions_spawn (default: true)
-  --no-notify             Use raw sessions_spawn (disable spawn-notify)
-  -h, --help              Show this help
-
-Environment:
-  PROTECTION_MODE=true    Force protection mode
-  OPENCLAW_WORKSPACE      Path to OpenClaw workspace
-
-Examples:
-  task-router.sh --task "Read HEARTBEAT.md"
-  task-router.sh --task "Create a new skill and publish on GitHub" --json
-  task-router.sh --task "Debug login endpoint" --check-protection
-  PROTECTION_MODE=true task-router.sh --task "Complex audit" --json
-EOF
-    exit 0
-}
-
-# Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
         --task) TASK="$2"; shift 2 ;;
@@ -61,284 +17,116 @@ while [[ $# -gt 0 ]]; do
         --dry-run) DRY_RUN=true; shift ;;
         --use-notify) USE_NOTIFY=true; shift ;;
         --no-notify) USE_NOTIFY=false; shift ;;
-        -h|--help) usage ;;
-        *) echo "Unknown option: $1"; usage ;;
+        -h|--help) echo "Usage: task-router.sh --task \"description\" [--json] [--check-protection] [--dry-run] [--no-notify]"; exit 0 ;;
+        *) echo "Unknown: $1" >&2; exit 1 ;;
     esac
 done
 
-if [[ -z "$TASK" ]]; then
-    echo "Error: --task is required" >&2
-    usage
-fi
+[[ -z "$TASK" ]] && { echo "Error: --task required" >&2; exit 1; }
 
-# Check if jq is available
-if ! command -v jq &>/dev/null; then
-    echo "Error: jq is required but not installed" >&2
-    exit 1
-fi
-
-# Lowercase task for matching
 TASK_LOWER="$(echo "$TASK" | tr '[:upper:]' '[:lower:]')"
 
-# Check protection mode
-is_protection_mode() {
-    # Environment override
-    if [[ "${PROTECTION_MODE:-false}" == "true" ]]; then
-        echo "true"
-        return
-    fi
-    
-    # Check state file
-    if [[ -f "$PROTECTION_STATE_FILE" ]]; then
-        local mode
-        mode=$(jq -r '.protection_mode // false' "$PROTECTION_STATE_FILE" 2>/dev/null || echo "false")
-        echo "$mode"
-        return
-    fi
-    
-    echo "false"
-}
+# Single jq call: extract all keywords/patterns and compute scores
+SCORES=$(jq -r --arg task "$TASK_LOWER" '
+def match_word($t; $kw):
+  $t | test("(^|[^a-zà-ÿ])" + $kw + "([^a-zà-ÿ]|$)"; "i");
 
-# Count weighted keyword matches for a category
-count_matches() {
-    local category="$1"
-    local count=0
-    
-    # Check keywords with weights (support multiple tiers)
-    for tier in "keywords_high" "keywords_medium" "keywords_low" "keywords"; do
-        local weight_key="${tier/keywords/keyword_weight}"
-        # Map tier to weight key
-        case "$tier" in
-            keywords_high) weight_key="keyword_weight_high" ;;
-            keywords_medium) weight_key="keyword_weight_medium" ;;
-            keywords_low) weight_key="keyword_weight_low" ;;
-            keywords) weight_key="keyword_weight" ;;
-        esac
-        
-        local weight
-        weight=$(jq -r ".${category}.${weight_key} // 1" "$RULES_FILE" 2>/dev/null)
-        
-        local keywords
-        keywords=$(jq -r ".${category}.${tier}[]?" "$RULES_FILE" 2>/dev/null)
-        [[ -z "$keywords" ]] && continue
-        
-        while IFS= read -r keyword; do
-            [[ -z "$keyword" ]] && continue
-            # Match as whole word using word boundaries
-            if echo "$TASK_LOWER" | grep -qwi "$keyword"; then
-                ((count += weight))
-            fi
-        done <<< "$keywords"
-    done
-    
-    # Check patterns
-    local patterns
-    patterns=$(jq -r ".${category}.patterns[]?" "$RULES_FILE" 2>/dev/null)
-    while IFS= read -r pattern; do
-        if [[ -n "$pattern" && "$TASK_LOWER" == *"$pattern"* ]]; then
-            ((count += 3))  # Patterns weigh more
-        fi
-    done <<< "$patterns"
-    
-    echo "$count"
-}
+def score_tier($t; $cat; $tier; $weight_key; $default_weight):
+  ($cat[$weight_key] // $default_weight) as $w |
+  ([$cat[$tier] // [] | .[] | select(match_word($t; .))] | length) * $w;
 
-# Estimate task complexity (word count + keyword density)
-estimate_complexity() {
-    local word_count
-    word_count=$(echo "$TASK" | wc -w | tr -d ' ')
-    
-    local complexity="simple"
-    if [[ $word_count -gt 15 ]]; then
-        complexity="complex"
-    elif [[ $word_count -gt 7 ]]; then
-        complexity="medium"
-    fi
-    
-    # Check for complexity indicators (only strong signals)
-    if echo "$TASK_LOWER" | grep -qE "(and then|after that|multiple|several|every|each|publish|deploy|github|npm)"; then
-        complexity="complex"
-    fi
-    
-    # Multi-action tasks (contains "and")
-    if echo "$TASK_LOWER" | grep -qE " and (publish|deploy|push|test|then)"; then
-        complexity="complex"
-    fi
-    
-    echo "$complexity"
-}
+def score_patterns($t; $cat):
+  ([$cat["patterns"] // [] | .[] | . as $p | select($t | contains($p))] | length) * 3;
 
-# Generate a label from task description
-generate_label() {
-    echo "$TASK_LOWER" | \
-        sed 's/[^a-z0-9 ]//g' | \
-        awk '{for(i=1;i<=NF && i<=4;i++) printf "%s-", $i; print ""}' | \
-        sed 's/-$//' | \
-        head -c 40
-}
+def score_category($t; $cat):
+  score_tier($t; $cat; "keywords_high"; "keyword_weight_high"; 3) +
+  score_tier($t; $cat; "keywords_medium"; "keyword_weight_medium"; 2) +
+  score_tier($t; $cat; "keywords_low"; "keyword_weight_low"; 5) +
+  score_tier($t; $cat; "keywords"; "keyword_weight"; 2) +
+  score_patterns($t; $cat);
 
-# Main routing logic
-route_task() {
-    local direct_score opus_score sonnet_score conversation_score
-    direct_score=$(count_matches "execute_direct")
-    sonnet_score=$(count_matches "spawn_sonnet")
-    opus_score=$(count_matches "spawn_opus")
-    conversation_score=$(count_matches "conversation")
-    
-    local complexity
-    complexity=$(estimate_complexity)
-    
-    local protection
-    protection=$(is_protection_mode)
-    
-    local recommendation="spawn"
-    local model="anthropic/claude-sonnet-4-5"
-    local model_name="Sonnet"
-    local reasoning=""
-    local timeout=600
-    local cost="medium"
-    local protection_override=false
-    
-    local spawn_total=$((sonnet_score + opus_score))
-    
-    # Decision logic:
-    # 1. Conversation: highest conversation score, no spawn keywords, simple task
-    # 2. Execute direct: highest direct score, no significant spawn keywords
-    # 3. Spawn Opus: opus keywords or complex task
-    # 4. Spawn Sonnet: default fallback
-    
-    if [[ $conversation_score -gt 0 && $spawn_total -eq 0 && $direct_score -eq 0 && "$complexity" == "simple" ]]; then
-        recommendation="conversation"
-        model=""
-        model_name=""
-        reasoning="Simple conversational response. Keywords matched: conversation=${conversation_score}."
-        timeout=5
-        cost="none"
-    elif [[ $direct_score -gt 0 && $direct_score -ge $spawn_total && ( "$complexity" == "simple" || "$complexity" == "medium" || $direct_score -ge 10 ) ]]; then
-        recommendation="execute_direct"
-        model=""
-        model_name=""
-        reasoning="Task matches direct execution patterns (simple, quick). Keywords matched: direct=${direct_score}, spawn=${spawn_total}."
-        timeout=10
-        cost="low"
-    elif [[ $opus_score -gt $sonnet_score || "$complexity" == "complex" ]]; then
-        recommendation="spawn"
-        model="anthropic/claude-opus-4-6"
-        model_name="Opus"
-        reasoning="Task matches complex patterns requiring Opus (code/debug/build). Keywords matched: opus=${opus_score}, sonnet=${sonnet_score}."
-        timeout=$(jq -r '.spawn_opus.timeout_default' "$RULES_FILE")
-        cost="high"
-        
-        # Protection mode override
-        if [[ "$protection" == "true" ]]; then
-            model="anthropic/claude-sonnet-4-5"
-            model_name="Sonnet"
-            reasoning="${reasoning} ⚠️ Protection mode active: forced to Sonnet."
-            cost="medium"
-            protection_override=true
-        fi
-    else
-        recommendation="spawn"
-        model="anthropic/claude-sonnet-4-5"
-        model_name="Sonnet"
-        reasoning="Task matches standard patterns suitable for Sonnet. Keywords matched: sonnet=${sonnet_score}."
-        timeout=$(jq -r '.spawn_sonnet.timeout_default' "$RULES_FILE")
-        cost="medium"
-    fi
-    
-    local label
-    label=$(generate_label)
-    
-    local command=""
-    if [[ "$recommendation" == "spawn" ]]; then
-        if [[ "$USE_NOTIFY" == "true" ]]; then
-            command="spawn-notify.sh --task '${TASK}' --model '${model}' --label '${label}' --timeout ${timeout}"
-        else
-            command="sessions_spawn --task '${TASK}' --model '${model}' --label '${label}'"
-        fi
-    fi
-    
-    # Output
-    if [[ "$JSON_OUTPUT" == "true" ]]; then
-        jq -n \
-            --arg rec "$recommendation" \
-            --arg model "$model" \
-            --arg model_name "$model_name" \
-            --arg reasoning "$reasoning" \
-            --arg command "$command" \
-            --argjson timeout "$timeout" \
-            --arg cost "$cost" \
-            --argjson protection "$([[ "$protection" == "true" ]] && echo true || echo false)" \
-            --argjson protection_override "$([[ "$protection_override" == "true" ]] && echo true || echo false)" \
-            --arg complexity "$complexity" \
-            --arg label "$label" \
-            --argjson dry_run "$([[ "$DRY_RUN" == "true" ]] && echo true || echo false)" \
-            '{
-                recommendation: $rec,
-                model: $model,
-                model_name: $model_name,
-                reasoning: $reasoning,
-                command: $command,
-                timeout_seconds: $timeout,
-                estimated_cost: $cost,
-                protection_mode: $protection,
-                protection_mode_override: $protection_override,
-                complexity: $complexity,
-                label: $label,
-                dry_run: $dry_run
-            }'
-    else
-        echo ""
-        if [[ "$recommendation" == "execute_direct" ]]; then
-            echo -e "${GREEN}⚡ EXECUTE DIRECTLY${NC}"
-        else
-            echo -e "${BLUE}🔀 SPAWN SUB-AGENT${NC}"
-        fi
-        echo ""
-        echo -e "  Task:        ${TASK}"
-        echo -e "  Complexity:  ${complexity}"
-        echo -e "  Model:       ${model_name:-N/A} ${model:+($model)}"
-        echo -e "  Timeout:     ${timeout}s"
-        echo -e "  Est. Cost:   ${cost}"
-        echo -e "  Label:       ${label}"
-        echo ""
-        echo -e "  ${YELLOW}Reasoning:${NC} ${reasoning}"
-        
-        if [[ -n "$command" ]]; then
-            echo ""
-            echo -e "  ${BLUE}Command:${NC}"
-            echo -e "  ${command}"
-        fi
-        
-        if [[ "$protection" == "true" ]]; then
-            echo ""
-            echo -e "  ${RED}🛡️  Protection mode is ACTIVE${NC}"
-            if [[ "$protection_override" == "true" ]]; then
-                echo -e "  ${YELLOW}   → Opus downgraded to Sonnet${NC}"
-            fi
-        fi
-        
-        if [[ "$DRY_RUN" == "true" ]]; then
-            echo ""
-            echo -e "  ${YELLOW}🧪 DRY RUN — no action taken${NC}"
-        fi
-        echo ""
-    fi
+{
+  direct: score_category($task; .execute_direct),
+  sonnet: score_category($task; .spawn_sonnet),
+  opus: score_category($task; .spawn_opus),
+  sonnet_timeout: (.spawn_sonnet.timeout_default // 600),
+  opus_timeout: (.spawn_opus.timeout_default // 1800)
 }
+| "\(.direct) \(.sonnet) \(.opus) \(.sonnet_timeout) \(.opus_timeout)"
+' "$RULES_FILE")
 
-# Handle --check-protection flag
+read -r DIRECT_SCORE SONNET_SCORE OPUS_SCORE SONNET_TIMEOUT OPUS_TIMEOUT <<< "$SCORES"
+
+# Complexity estimate
+WORD_COUNT=$(echo "$TASK" | wc -w | tr -d ' ')
+COMPLEXITY="simple"
+[[ $WORD_COUNT -gt 7 ]] && COMPLEXITY="medium"
+[[ $WORD_COUNT -gt 15 ]] && COMPLEXITY="complex"
+echo "$TASK_LOWER" | grep -qE " and (publish|deploy|push|test|then)|and then|after that|multiple|several|every|each|publish|deploy|github|npm" && COMPLEXITY="complex"
+
+# Protection mode
+PROTECTION="false"
+[[ "${PROTECTION_MODE:-false}" == "true" ]] && PROTECTION="true"
+[[ "$PROTECTION" == "false" && -f "$PROTECTION_STATE_FILE" ]] && \
+    PROTECTION=$(jq -r '.protection_mode // false' "$PROTECTION_STATE_FILE" 2>/dev/null || echo "false")
+
+# Handle --check-protection
 if [[ "$CHECK_PROTECTION" == "true" ]]; then
-    protection=$(is_protection_mode)
     if [[ "$JSON_OUTPUT" == "true" ]]; then
-        jq -n --argjson active "$([[ "$protection" == "true" ]] && echo true || echo false)" \
-            '{protection_mode_active: $active}'
+        echo "{\"protection_mode_active\":$([[ "$PROTECTION" == "true" ]] && echo true || echo false)}"
     else
-        if [[ "$protection" == "true" ]]; then
-            echo -e "${RED}🛡️  Protection mode: ACTIVE${NC}"
-        else
-            echo -e "${GREEN}✅ Protection mode: INACTIVE${NC}"
-        fi
+        [[ "$PROTECTION" == "true" ]] && echo "🛡️  Protection mode: ACTIVE" || echo "✅ Protection mode: INACTIVE"
     fi
 fi
 
-route_task
+# Label
+LABEL=$(echo "$TASK_LOWER" | sed 's/[^a-z0-9 ]//g' | awk '{for(i=1;i<=NF&&i<=4;i++) printf "%s-",$i}' | sed 's/-$//' | head -c 40)
+
+# Decision
+SPAWN_TOTAL=$((SONNET_SCORE + OPUS_SCORE))
+REC="spawn" MODEL="anthropic/claude-sonnet-4-5" MODEL_NAME="Sonnet" TIMEOUT=$SONNET_TIMEOUT COST="medium" PROT_OVERRIDE=false
+
+if [[ $DIRECT_SCORE -gt 0 && $DIRECT_SCORE -ge $SPAWN_TOTAL && ("$COMPLEXITY" == "simple" || "$COMPLEXITY" == "medium" || $DIRECT_SCORE -ge 10) ]]; then
+    REC="execute_direct" MODEL="" MODEL_NAME="" TIMEOUT=10 COST="low"
+    REASONING="Direct execution (score: direct=${DIRECT_SCORE} vs spawn=${SPAWN_TOTAL})"
+elif [[ $OPUS_SCORE -gt $SONNET_SCORE || "$COMPLEXITY" == "complex" ]]; then
+    MODEL="anthropic/claude-opus-4-6" MODEL_NAME="Opus" TIMEOUT=$OPUS_TIMEOUT COST="high"
+    REASONING="Opus spawn (score: opus=${OPUS_SCORE}, sonnet=${SONNET_SCORE}, complexity=${COMPLEXITY})"
+    if [[ "$PROTECTION" == "true" ]]; then
+        MODEL="anthropic/claude-sonnet-4-5" MODEL_NAME="Sonnet" COST="medium" PROT_OVERRIDE=true
+        REASONING="${REASONING} ⚠️ Protection→Sonnet"
+    fi
+else
+    REASONING="Sonnet spawn (score: sonnet=${SONNET_SCORE}, opus=${OPUS_SCORE})"
+fi
+
+# Command
+CMD=""
+if [[ "$REC" == "spawn" ]]; then
+    if [[ "$USE_NOTIFY" == "true" ]]; then
+        CMD="spawn-notify.sh --task '${TASK}' --model '${MODEL}' --label '${LABEL}' --timeout ${TIMEOUT}"
+    else
+        CMD="sessions_spawn --task '${TASK}' --model '${MODEL}' --label '${LABEL}'"
+    fi
+fi
+
+# Output
+if [[ "$JSON_OUTPUT" == "true" ]]; then
+    cat <<EOF
+{"recommendation":"${REC}","model":"${MODEL}","model_name":"${MODEL_NAME}","reasoning":"${REASONING}","command":"${CMD}","timeout_seconds":${TIMEOUT},"estimated_cost":"${COST}","protection_mode":$([[ "$PROTECTION" == "true" ]] && echo true || echo false),"protection_mode_override":$([[ "$PROT_OVERRIDE" == "true" ]] && echo true || echo false),"complexity":"${COMPLEXITY}","label":"${LABEL}","dry_run":$([[ "$DRY_RUN" == "true" ]] && echo true || echo false)}
+EOF
+else
+    echo ""
+    [[ "$REC" == "execute_direct" ]] && echo "⚡ EXECUTE DIRECTLY" || echo "🔀 SPAWN SUB-AGENT"
+    echo "  Task:       $TASK"
+    echo "  Complexity: $COMPLEXITY"
+    echo "  Model:      ${MODEL_NAME:-N/A} ${MODEL:+($MODEL)}"
+    echo "  Timeout:    ${TIMEOUT}s"
+    echo "  Cost:       $COST"
+    echo "  Label:      $LABEL"
+    echo "  Reasoning:  $REASONING"
+    [[ -n "$CMD" ]] && echo "  Command:    $CMD"
+    [[ "$PROTECTION" == "true" ]] && echo "  🛡️  Protection ACTIVE"
+    [[ "$DRY_RUN" == "true" ]] && echo "  🧪 DRY RUN"
+    echo ""
+fi
