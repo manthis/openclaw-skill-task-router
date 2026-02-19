@@ -24,9 +24,10 @@ task-router.sh --task "Create a new skill and publish on GitHub" --json
 
 ## Features
 
-- **Keyword matching** against configurable decision rules
-- **Complexity estimation** from task description
-- **Model selection** (Opus / Sonnet / Codex)
+- **Structural analysis** — NO regex, NO keyword dictionaries, pure linguistic signals
+- **Complexity estimation** from word count, grammar, and task structure
+- **Smart routing** — `ask_user` for ambiguous tasks, automatic model selection
+- **Model selection** (Opus / Sonnet) based on estimated complexity
 - **Protection mode** awareness — respects budget constraints
 - **Command generation** — ready-to-use spawn commands
 - **JSON or human-readable** output
@@ -72,19 +73,19 @@ $ PROTECTION_MODE=true task-router.sh --task "Debug complex bug" --json
 }
 ```
 
-## Configuration
+## How It Works
 
-### Decision Rules (`lib/decision-rules.json`)
+**Pure structural analysis — no configuration needed:**
 
-Customize keywords and patterns for each routing category:
-- `execute_direct` — Quick tasks (read, check, list)
-- `spawn_sonnet` — Medium tasks (write, analyze, search)
-- `spawn_opus` — Complex tasks (build, debug, refactor)
-- `spawn_codex` — Fallback
-
-### Model Config (`lib/model-config.json`)
-
-Model identifiers, cost tiers, and default timeouts.
+1. **Text metrics** — word count, sentence count, list items
+2. **Grammar signals** — connectors, conditionals, technical references
+3. **Task type detection** — questions, imperatives, trivial messages
+4. **Time estimation** — based on complexity indicators
+5. **Smart routing:**
+   - `< 30s` → `execute_direct`
+   - `≥ 30s + ambiguous` → `ask_user` (prompt for clarification)
+   - `≥ 30s + normal` → spawn Sonnet
+   - `≥ 30s + complex` → spawn Opus
 
 ## Tests
 

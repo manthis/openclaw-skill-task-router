@@ -1,12 +1,306 @@
 #!/usr/bin/env python3
-"""task-router.py — Two-axis task routing: Time × Complexity → Decision
-Drop-in replacement for task-router.sh with identical output."""
+"""task-router.py — Structural complexity × estimated time routing.
+
+NO keyword dictionaries. NO regex. NO pattern matching.
+Pure structural analysis:
+  1. Word count / text length
+  2. Grammatical structure (splits, punctuation)
+  3. Semantic context from sentence shape
+
+Matrix:
+  < 30s           → execute_direct
+  ≥ 30s + normal  → spawn Sonnet
+  ≥ 30s + complex → spawn Opus
+"""
 
 import argparse
 import json
 import os
-import re
 import sys
+import unicodedata
+
+
+def strip_accents(s):
+    return ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
+
+
+def count_sentences(text):
+    """Count sentences by splitting on sentence-ending punctuation."""
+    count = 0
+    for c in text:
+        if c in '.!;':
+            count += 1
+    # A text without any terminator is still 1 sentence
+    return max(count, 1)
+
+
+def count_list_items(text):
+    """Count numbered or bulleted list items via line-start analysis."""
+    count = 0
+    for line in text.split('\n'):
+        stripped = line.lstrip()
+        if not stripped:
+            continue
+        # Numbered: "1. " or "1) "
+        if len(stripped) >= 3 and stripped[0].isdigit():
+            rest = stripped.lstrip('0123456789')
+            if rest and rest[0] in '.):' and len(rest) > 1 and rest[1] == ' ':
+                count += 1
+        # Bulleted: "- " or "• "
+        if stripped.startswith('- ') or stripped.startswith('• '):
+            count += 1
+    return count
+
+
+def has_technical_refs(text):
+    """Detect technical references: paths, dotted identifiers, backtick code."""
+    score = 0
+    # Paths: contains /word/ pattern
+    parts = text.split('/')
+    if len(parts) >= 3:
+        score += 1
+    # Backtick code spans
+    if text.count('`') >= 2:
+        score += 1
+    # Dotted identifiers (e.g. app.config.value) — 3+ segments
+    for word in text.split():
+        segments = word.split('.')
+        if len(segments) >= 3 and all(s.isalnum() for s in segments if s):
+            score += 1
+            break
+    # URLs
+    if 'http://' in text or 'https://' in text:
+        score += 1
+    return score
+
+
+def is_question(text, first_word_norm):
+    """Detect questions from punctuation and interrogative openers."""
+    if text.rstrip().endswith('?'):
+        return True
+    interrogatives = {
+        'qui', 'que', 'quoi', 'quel', 'quelle', 'quels', 'quelles',
+        'comment', 'pourquoi', 'combien', 'ou', 'quand',
+        'what', 'how', 'why', 'when', 'where', 'which', 'who',
+        'is', 'are', 'can', 'do', 'does', 'did', 'will', 'would',
+        'could', 'should',
+    }
+    return first_word_norm in interrogatives
+
+
+def is_trivial_message(text_lower, word_count):
+    """Detect greetings, acknowledgements, emoji-only messages."""
+    if word_count > 3:
+        return False
+    trivials = {
+        'ok', 'oui', 'non', 'yes', 'no', 'merci', 'thanks', 'super', 'cool',
+        'bien', 'parfait', 'good', 'great', 'nice', 'top', 'lol', 'mdr',
+        'haha', 'salut', 'hello', 'hi', 'bonjour', 'bonsoir', 'hey', 'yo',
+        'ciao', "d'accord", 'okay', 'go', 'yep', 'nope', 'ouais', 'yup',
+        'thx', 'ty', 'np', 'gg', 'bravo', 'genial',
+    }
+    # Check if all words are trivial
+    words = text_lower.split()
+    return all(w.strip('.,!?:;') in trivials or not any(c.isalpha() for c in w) for w in words)
+
+
+def count_connectors(text_norm):
+    """Count multi-step connectors by checking word sequences."""
+    connectors_single = {'puis', 'ensuite', 'then', 'additionally', 'furthermore', 'egalement'}
+    connectors_double = {
+        ('et', 'puis'), ('and', 'then'), ('after', 'that'),
+        ('apres', 'ca'), ('step', 'by'),
+    }
+    words = text_norm.split()
+    count = 0
+    for w in words:
+        if w in connectors_single:
+            count += 1
+    for i in range(len(words) - 1):
+        if (words[i], words[i + 1]) in connectors_double:
+            count += 1
+    return count
+
+
+def count_conditionals(text_norm):
+    """Count conditional/constraint clauses."""
+    cond_words = {'si', 'if', 'sauf', 'except', 'unless', 'selon', 'depending', 'provided'}
+    words = text_norm.split()
+    return sum(1 for w in words if w in cond_words)
+
+
+def detect_imperative(first_word_norm, question, word_count):
+    """Detect imperative sentences (commands starting with a verb)."""
+    if question:
+        return False
+    
+    # Allow 2-word commands (e.g., "debug endpoint", "crée API")
+    if word_count < 2:
+        return False
+    
+    non_action = {
+        'le', 'la', 'les', 'un', 'une', 'des', 'mon', 'ma', 'mes', 'ton', 'ta', 'tes',
+        'son', 'sa', 'ses', 'ce', 'cette', 'ces', 'the', 'a', 'an', 'my', 'your', 'his',
+        'her', 'its', 'our', 'their', 'this', 'that', 'these', 'those',
+        'je', 'tu', 'il', 'elle', 'on', 'nous', 'vous', 'ils', 'elles',
+        'i', 'you', 'he', 'she', 'we', 'they', 'it',
+        'ok', 'oui', 'non', 'yes', 'no', 'merci', 'thanks', 'super', 'cool', 'bien',
+        'parfait', 'good', 'great', 'nice', 'top', 'salut', 'hello', 'hi',
+        'bonjour', 'bonsoir', 'hey', 'yo', 'ciao',
+    }
+    return first_word_norm not in non_action
+
+
+def is_ambiguous_task(analysis):
+    """Detect ambiguous tasks that need user clarification.
+    
+    Criteria:
+    1. Estimated time >= 30s (needs spawn)
+    2. Very short (< 5 words)
+    3. Imperative (action request)
+    4. Lack of structural detail (no tech refs, lists, conditionals)
+    5. No clear quantifiers or targets
+    """
+    if analysis['estimated_seconds'] < 30:
+        return False
+    
+    if analysis['word_count'] >= 5:
+        return False
+    
+    if not analysis['is_imperative']:
+        return False
+    
+    text = analysis.get('text', '')
+    
+    # Check for clear quantifiers or targets (indicates specific task scope)
+    has_quantifier = any(c.isdigit() for c in text)  # Numbers like "10 articles"
+    
+    # Check for lack of structural context
+    has_context = (
+        analysis['technical_refs'] > 0 or
+        analysis['total_steps'] > 1 or
+        has_quantifier or
+        '.' in text  # File extensions
+    )
+    
+    return not has_context
+
+
+def analyze_task(task: str) -> dict:
+    """Analyze task purely from structural signals. No regex."""
+    text = task.strip()
+    text_lower = text.lower()
+    text_norm = strip_accents(text_lower)
+    words = text.split()
+    word_count = len(words)
+
+    first_word_norm = strip_accents(words[0].lower().rstrip('.,!?:;')) if words else ''
+
+    question = is_question(text, first_word_norm)
+    trivial = is_trivial_message(text_norm, word_count)
+    imperative = detect_imperative(first_word_norm, question, word_count)
+    connectors = count_connectors(text_norm)
+    list_items = count_list_items(text)
+    sentences = count_sentences(text)
+    conditionals = count_conditionals(text_norm)
+    tech_refs = has_technical_refs(text)
+    comma_count = text.count(',')
+
+    total_steps = 1 + connectors + list_items
+    if comma_count >= 3:
+        total_steps += 1
+    if sentences >= 3:
+        total_steps += 1
+
+    # ── Complexity (1=simple, 2=normal, 3=complex) ──
+    complexity = 1
+
+    if word_count > 30:
+        complexity = max(complexity, 3)
+    elif word_count > 15:
+        complexity = max(complexity, 2)
+    elif word_count > 8:
+        complexity = max(complexity, 2)
+
+    if total_steps >= 3:
+        complexity = max(complexity, 3)
+    elif total_steps >= 2:
+        complexity = max(complexity, 2)
+
+    if conditionals >= 2:
+        complexity = max(complexity, 3)
+    elif conditionals >= 1:
+        complexity = max(complexity, 2)
+
+    if tech_refs >= 2:
+        complexity = max(complexity, 3)
+    elif tech_refs >= 1:
+        complexity = max(complexity, 2)
+
+    # Questions cap complexity down
+    if question and word_count <= 10:
+        complexity = min(complexity, 1)
+    elif question and word_count <= 20:
+        complexity = min(complexity, 2)
+
+    # Trivial or very short → simple
+    if trivial or word_count <= 2:
+        complexity = 1
+    elif word_count <= 4 and not imperative:
+        complexity = 1
+
+    # ── Time estimation ──
+    if trivial:
+        estimated = 5
+    elif word_count <= 2 and not imperative:
+        estimated = 5
+    elif word_count <= 2 and imperative:
+        # Short imperative like "debug endpoint" or "crée API"
+        estimated = 50
+    elif word_count <= 4 and not imperative:
+        estimated = 10
+    elif word_count <= 4 and imperative:
+        estimated = 50
+    elif question and word_count <= 10:
+        estimated = 15
+    elif question and word_count <= 20:
+        estimated = 30
+    elif question:
+        estimated = 45
+    elif word_count <= 8:
+        estimated = 35
+    elif word_count <= 15:
+        estimated = 60
+    else:
+        estimated = 90
+
+    # Adjustments
+    estimated += connectors * 25
+    estimated += list_items * 20
+    estimated += conditionals * 15
+    estimated += tech_refs * 15
+
+    if word_count > 30:
+        estimated += 40
+
+    # Question cap
+    if question and word_count <= 10:
+        estimated = min(estimated, 20)
+
+    complexity_name = {1: 'simple', 2: 'normal', 3: 'complex'}[complexity]
+
+    return {
+        'estimated_seconds': estimated,
+        'complexity': complexity,
+        'complexity_name': complexity_name,
+        'word_count': word_count,
+        'is_question': question,
+        'is_imperative': imperative,
+        'total_steps': total_steps,
+        'technical_refs': tech_refs,
+        'text': text,
+    }
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -20,178 +314,26 @@ def main():
 
     use_notify = args.use_notify and not args.no_notify
     task = args.task
-    task_lower = task.lower()
-    word_count = len(task.split())
 
-    # Category scores
-    scores = {k: 0 for k in ['conversation','lookup','search','content','filemod','code','debug','architecture','deploy','config']}
-
-    def match(pattern):
-        return re.search(pattern, task_lower) is not None
-
-    # Conversation
-    if re.match(r'^(ok|oui|non|yes|no|merci|thanks|super|cool|bien|parfait|good|great|salut|hello|hi|bonjour|bonsoir|hey|yo|ciao|d.accord|okay|vas-y|go|fais-le|lance|c.est bon|top|nice|lol|mdr|haha|👍|❤️|🙏)$', task_lower):
-        scores['conversation'] = 10
-    if re.match(r'^\s*(quel |quelle |comment |pourquoi |combien |où |quand |est-ce que |what |how |why |when |where |which |who |is |are |can |do |does )', task_lower):
-        scores['conversation'] += 5
-    if task_lower.rstrip().endswith('?'):
-        scores['conversation'] += 3
-    if match(r'\b(penses|think|opinion|avis|recommend|conseille|préfère|prefer|choix|choice)\b'):
-        scores['conversation'] += 4
-
-    # Lookup
-    if match(r'\b(check|vérifie|show|affiche|list|liste|status|état|info|get|récupère|dis-moi|tell me|regarde|look|montre)\b'):
-        scores['lookup'] += 5
-    if match(r'\b(calendar|calendrier|agenda|weather|météo|meteo|heure|time|date|aujourd.hui|today|demain|tomorrow|rappelle|remind)\b'):
-        scores['lookup'] += 6
-    if match(r'\b(read|lis|log|logs|git status|git log|git diff)\b'):
-        scores['lookup'] += 4
-
-    # Search
-    if match(r'\b(recherche|cherche|search|find|trouve|trouver|articles?|papers?|sources?|références?)\b'):
-        scores['search'] += 5
-    if match(r'\b(investigate|explore|analyze|analyse|compare|audit|review|evaluate|évalue|benchmark|état de l.art|state of the art)\b'):
-        scores['search'] += 5
-    if match(r'\b[0-9]+\s*(articles?|exemples?|sources?|liens?|links?|results?|résultats?|options?|alternatives?)\b'):
-        scores['search'] += 4
-
-    # Content
-    if match(r'\b(rédige|draft|compose|write|écris|résume|summarize|summary|résumé|traduis|translate)\b'):
-        scores['content'] += 5
-    if match(r'\b(email|mail|message|lettre|letter|article|blog|post|doc|documentation|readme|rapport|report)\b'):
-        scores['content'] += 4
-
-    # Filemod
-    if match(r'\b(update|met à jour|modifie|modify|change|edit|édite|améliore|improve|réécris|rewrite|ajoute|add|supprime|remove|delete|rename|renomme)\b'):
-        scores['filemod'] += 5
-    if match(r'\b(fichier|file|config|\.json|\.yaml|\.yml|\.toml|\.env|\.md|\.txt)\b'):
-        scores['filemod'] += 3
-
-    # Code
-    if match(r'\b(code|script|function|fonction|implement|implémente|développe|develop|programme|program|endpoint|api|route|handler|middleware|class|module|package|library|lib)\b'):
-        scores['code'] += 6
-    if match(r'\b(crée|créer|create|build|write a|écris un)\b'):
-        if scores['code'] > 0:
-            scores['code'] += 4
-        else:
-            scores['content'] += 2
-            scores['code'] += 2
-    if match(r'\b(skill|plugin|tool|bot|cli|daemon|service|worker|cron|webhook|docker|container|k8s|kubernetes)\b'):
-        scores['code'] += 5
-    if match(r'\b(test|tests|spec|unittest|jest|pytest|ci|cd|pipeline|lint|eslint|prettier|type.?check)\b'):
-        scores['code'] += 4
-    if match(r'\b(refactor|refactorise|optimize|optimise|clean.?up|restructure)\b'):
-        scores['code'] += 5
-        scores['filemod'] += 3
-
-    # Debug — split imperative (action) vs informational
-    if match(r'\b(fix|corrige|résous|resolve|troubleshoot|répare)\b'):
-        scores['debug'] += 8  # Strong: clearly requesting action
-    if match(r'\b(debug|debugge|diagnose|diagnostique)\b'):
-        scores['debug'] += 6  # Medium: could be question or action
-    if match(r"\b(error|erreur|bug|issue|broken|cassé|crash|fail|failed|marche pas|doesn.t work|not working|problem|problème|weird|bizarre|strange|étrange)\b"):
-        scores['debug'] += 5
-    if match(r'\b(stack.?trace|traceback|exception|segfault|undefined|null|nan|timeout|502|500|404|403|401)\b'):
-        scores['debug'] += 4
-
-    # Architecture
-    if match(r'\b(architect|architecture|design|conception|plan|planifie|stratégie|strategy|roadmap|spec|specification)\b'):
-        scores['architecture'] += 7
-    if match(r'\b(système|system|infrastructure|infra|stack|database|db|schema|migration|migrate|scale|scaling)\b'):
-        scores['architecture'] += 4
-    if match(r'\b(multi|plusieurs composants|several components|microservice|monorepo|event.?driven|pub.?sub|queue|message broker)\b'):
-        scores['architecture'] += 5
-
-    # Deploy
-    if match(r'\b(deploy|déploie|publish|publie|release|ship|merge|pr |pull request|push to|vercel|netlify|heroku|aws|gcp|azure)\b'):
-        scores['deploy'] += 6
-
-    # Config
-    if match(r'\b(install|installe|configure|setup|set up|config|provision|bootstrap|init|initialize)\b'):
-        scores['config'] += 5
-    if match(r'\b(ssh|ssl|tls|cert|certificate|dns|domain|nginx|apache|proxy|firewall|port|env|environment)\b'):
-        scores['config'] += 4
-
-    # Pre-compute question detection
-    is_question = bool(task_lower.rstrip().endswith('?'))
-    if re.match(r'^\s*(c.est quoi|qu.est-ce que|what is|what.s|why does|pourquoi|how |comment |explique|explain|describe|décris)', task_lower):
-        is_question = True
-
-    # Dominant category
-    dominant = max(scores, key=scores.get)
-    max_score = scores[dominant]
-    if max_score <= 2:
-        dominant = 'conversation'
-
-    # Tie-breaking: short questions with technical keywords → prefer conversation
-    if dominant != 'conversation' and is_question and word_count <= 6:
-        score_diff = max_score - scores['conversation']
-        if score_diff <= 3:
-            dominant = 'conversation'
-            max_score = scores['conversation']
-
-    # Map category → base time + complexity
-    cat_map = {
-        'conversation': (10, 1, 'simple'),
-        'lookup':       (12, 1, 'simple'),
-        'search':       (45, 2, 'normal'),
-        'content':      (50, 2, 'normal'),
-        'filemod':      (40, 2, 'normal'),
-        'code':         (80, 3, 'complex'),
-        'debug':        (90, 3, 'complex'),
-        'architecture': (120, 3, 'complex'),
-        'deploy':       (60, 2, 'normal'),
-        'config':       (50, 2, 'normal'),
-    }
-    base_time, complexity, complexity_name = cat_map[dominant]
-
-    # Question dampener: short questions about technical topics are explanations, not work
-    if is_question and word_count <= 8 and dominant in ('debug', 'code', 'architecture'):
-        if word_count <= 5:
-            complexity, complexity_name, base_time = 1, 'simple', 15
-        else:
-            complexity, complexity_name, base_time = 2, 'normal', 25
-
-    # Medium-length explanation questions: cap at normal
-    if is_question and word_count <= 12:
-        if re.match(r'^\s*(c.est quoi|qu.est-ce que|what is|what.s|explain|explique|how does|comment|describe|décris)', task_lower):
-            if complexity >= 3:
-                complexity, complexity_name = 2, 'normal'
-                base_time = min(base_time, 40)
-
-    estimated = base_time
-
-    # Scope adjustments
-    if match(r'\b(and then|et ensuite|puis|après ça|ensuite|step.?by.?step|étape par étape)\b'):
-        estimated += 30
-    if match(r'\b(multiple|plusieurs|every|chaque|all|tous|toutes|each|batch|bulk)\b'):
-        estimated += 20
-    comma_count = task.count(',')
-    if comma_count >= 2:
-        estimated += comma_count * 10
-    if word_count > 30:
-        estimated += 40
-        if complexity >= 2:
-            complexity, complexity_name = 3, 'complex'
-    elif word_count > 15:
-        estimated += 20
-    elif word_count <= 4 and dominant == 'conversation':
-        estimated = min(estimated, 10)
-
-    if scores['code'] >= 3 and scores['debug'] >= 3:
-        estimated += 30
-        complexity, complexity_name = 3, 'complex'
-    if scores['architecture'] >= 3 and scores['code'] >= 3:
-        estimated += 40
-        complexity, complexity_name = 3, 'complex'
-    if re.search(r'\b(commit|push|test|tests)\s*[,.]?\s*$', task_lower) or match(r'\bcommit.*(push|et push)'):
-        estimated += 15
+    analysis = analyze_task(task)
+    estimated = analysis['estimated_seconds']
+    complexity = analysis['complexity']
+    complexity_name = analysis['complexity_name']
 
     # Decision
-    if estimated <= 30:
-        rec = 'execute_direct'
-    else:
-        rec = 'spawn'
+    rec = 'execute_direct' if estimated <= 30 else 'spawn'
+
+    # Check for ambiguous tasks that need user clarification
+    uncertainty_reason = ''
+    ask_user_options = {}
+    
+    if rec == 'spawn' and is_ambiguous_task(analysis):
+        rec = 'ask_user'
+        uncertainty_reason = "Demande courte et ambiguë - contexte insuffisant"
+        ask_user_options = {
+            'sonnet': 'Tâche standard/normale',
+            'opus': 'Tâche complexe (code/debug/architecture)'
+        }
 
     model = model_name = ''
     timeout = 10
@@ -204,12 +346,18 @@ def main():
             model, model_name, cost = 'anthropic/claude-sonnet-4-5', 'Sonnet', 'medium'
             timeout = min(estimated * 3, 600)
 
-    reasoning = f"category={dominant} time={estimated}s complexity={complexity_name} → {rec}"
+    reasoning = (
+        f"words={analysis['word_count']} steps={analysis['total_steps']} "
+        f"question={analysis['is_question']} imperative={analysis['is_imperative']} "
+        f"tech_refs={analysis['technical_refs']} "
+        f"→ time={estimated}s complexity={complexity_name} → {rec}"
+    )
     if model_name:
         reasoning += f" ({model_name})"
 
     # Protection mode
-    protection_file = os.environ.get('OPENCLAW_WORKSPACE', os.path.expanduser('~/.openclaw/workspace')) + '/memory/claude-usage-state.json'
+    ws = os.environ.get('OPENCLAW_WORKSPACE', os.path.expanduser('~/.openclaw/workspace'))
+    protection_file = ws + '/memory/claude-usage-state.json'
     protection = os.environ.get('PROTECTION_MODE', 'false') == 'true'
     prot_override = False
     if not protection and os.path.isfile(protection_file):
@@ -224,7 +372,6 @@ def main():
         prot_override = True
         reasoning += ' ⚠️ Protection→Sonnet'
 
-    # Check protection output
     if args.check_protection:
         if args.json_output:
             print(json.dumps({'protection_mode_active': bool(protection)}))
@@ -232,8 +379,12 @@ def main():
             print('🛡️  Protection mode: ACTIVE' if protection else '✅ Protection mode: INACTIVE')
 
     # Label
-    label = re.sub(r'[^a-z0-9 ]', '', task_lower).split()[:4]
-    label = '-'.join(label)[:40]
+    label_words = []
+    for w in task.lower().split()[:4]:
+        cleaned = ''.join(c for c in w if c.isalnum() or c == ' ')
+        if cleaned:
+            label_words.append(cleaned)
+    label = '-'.join(label_words)[:40]
 
     # Command
     cmd = ''
@@ -245,26 +396,40 @@ def main():
 
     # Output
     if args.json_output:
-        print(json.dumps({
+        output = {
             'recommendation': rec, 'model': model, 'model_name': model_name,
             'reasoning': reasoning, 'command': cmd, 'timeout_seconds': timeout,
             'estimated_seconds': estimated, 'estimated_cost': cost,
-            'complexity': complexity_name, 'category': dominant,
+            'complexity': complexity_name,
             'protection_mode': bool(protection), 'protection_mode_override': prot_override,
             'label': label, 'dry_run': args.dry_run,
-        }, ensure_ascii=False))
+        }
+        
+        # Add ask_user specific fields
+        if rec == 'ask_user':
+            output['uncertainty_reason'] = uncertainty_reason
+            output['options'] = ask_user_options
+            output['task_summary'] = task
+        
+        print(json.dumps(output, ensure_ascii=False))
     else:
         print()
         if rec == 'execute_direct':
             print(f"⚡ EXECUTE DIRECTLY (estimated {estimated}s)")
+        elif rec == 'ask_user':
+            print(f"❓ ASK USER - AMBIGUOUS TASK (estimated {estimated}s)")
+            print(f"  Reason:     {uncertainty_reason}")
+            print(f"  Options:")
+            for model_choice, description in ask_user_options.items():
+                print(f"    - {model_choice}: {description}")
         else:
             print(f"🔀 SPAWN SUB-AGENT (estimated {estimated}s)")
         print(f"  Task:       {task}")
-        print(f"  Category:   {dominant}")
         print(f"  Complexity: {complexity_name} ({complexity}/3)")
-        print(f"  Model:      {model_name or 'N/A'} {'(' + model + ')' if model else ''}")
-        print(f"  Timeout:    {timeout}s")
-        print(f"  Cost:       {cost}")
+        if rec != 'ask_user':
+            print(f"  Model:      {model_name or 'N/A'} {'(' + model + ')' if model else ''}")
+            print(f"  Timeout:    {timeout}s")
+            print(f"  Cost:       {cost}")
         print(f"  Label:      {label}")
         print(f"  Reasoning:  {reasoning}")
         if cmd:
@@ -274,6 +439,7 @@ def main():
         if args.dry_run:
             print("  🧪 DRY RUN")
         print()
+
 
 if __name__ == '__main__':
     main()
