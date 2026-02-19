@@ -327,6 +327,72 @@ def is_short_confirmation(text_norm, word_count, first_word_norm):
     return True
 
 
+def is_continuation_instruction(text_norm, first_word_norm):
+    """Detect continuation/monitoring instructions (verify existing state, not create new).
+    
+    Distinguish between:
+    - "Continue à surveiller X" → verify existing monitoring is active (fast, <30s)
+    - "Configure la surveillance de X" → set up new monitoring (slow, spawn)
+    - "Ajoute X à la surveillance" → modify config (slow, spawn)
+    
+    Key insight: Continuation verbs (continue, garde, surveille) + context suggesting
+    verification of existing state rather than creation of new state.
+    
+    Patterns:
+        - "continue à [verb]" → verify continuation (fast)
+        - "garde un œil sur" → verify monitoring (fast)
+        - "surveille X" (without "configure"/"ajoute"/"setup") → verify (fast)
+        - "tiens-moi au courant de" → verify notification (fast)
+        - "maintiens" → verify maintenance (fast)
+    
+    BUT if contains setup/config verbs → new action (slow):
+        - "configure", "setup", "ajoute", "cree", "initialise"
+    
+    Examples:
+        ✓ "Continue à surveiller ces PRs" → True (15s) - verify monitoring active
+        ✓ "Garde un œil sur la RAM" → True (10s) - verify monitoring active
+        ✓ "Surveille les logs" (standalone) → True (15s) - verify monitoring
+        ✓ "Tiens-moi au courant des PRs" → True (10s) - verify notifications
+        ✗ "Configure la surveillance de X" → False (60s) - new setup
+        ✗ "Ajoute X à la surveillance" → False (60s) - modify config
+        ✗ "Crée un monitoring pour X" → False (60s) - new creation
+    """
+    # Continuation/monitoring verbs (suggest checking existing state)
+    continuation_verbs = {
+        'continue', 'garde', 'surveille', 'maintiens', 'keep',
+        'monitor', 'watch', 'tiens',
+    }
+    
+    # Setup/creation verbs (indicate new action)
+    setup_verbs = {
+        'configure', 'configurer', 'setup', 'ajoute', 'add', 'cree', 'create',
+        'initialise', 'initialize', 'installe', 'install', 'mets', 'set',
+        'etablis', 'establish', 'prepare', 'prepare',
+    }
+    
+    # Check if first word is a continuation verb
+    is_continuation_start = first_word_norm in continuation_verbs
+    
+    # Check if text contains setup verbs (even if not first word)
+    has_setup_verb = any(verb in text_norm for verb in setup_verbs)
+    
+    # If contains setup verbs, it's a new action (slow)
+    if has_setup_verb:
+        return False
+    
+    # If starts with continuation verb and no setup verbs → verification (fast)
+    if is_continuation_start:
+        return True
+    
+    # Additional patterns that suggest continuation (not at start)
+    continuation_patterns = {
+        'garde un oeil', 'keep an eye', 'tiens moi au courant',
+        'keep me updated', 'reste sur', 'stay on',
+    }
+    
+    return any(pattern in text_norm for pattern in continuation_patterns)
+
+
 def is_ambiguous_task(analysis):
     """Detect ambiguous tasks that need user clarification.
     
@@ -377,6 +443,7 @@ def analyze_task(task: str) -> dict:
     imperative = detect_imperative(first_word_norm, question, word_count)
     communication = is_communication_verb(first_word_norm, text_norm) if imperative else False
     verification = is_verification_question(text_norm, question)
+    continuation = is_continuation_instruction(text_norm, first_word_norm)
     connectors = count_connectors(text_norm)
     list_items = count_list_items(text)
     sentences = count_sentences(text)
@@ -436,6 +503,16 @@ def analyze_task(task: str) -> dict:
         estimated = 5
     elif trivial:
         estimated = 5
+    elif continuation:
+        # Continuation/monitoring instructions → verify existing state (fast)
+        # "Continue à surveiller X" → check monitoring is active + confirm
+        # Even if monitoring multiple things, checking is fast
+        if word_count <= 10:
+            estimated = 10
+        elif word_count <= 20:
+            estimated = 15
+        else:
+            estimated = 20  # Even long continuation checks are < 30s
     elif verification:
         # Verification/status questions are ALWAYS fast, even if long
         # Checking multiple things (files, repos, status) is still quick
@@ -471,18 +548,23 @@ def analyze_task(task: str) -> dict:
     else:
         estimated = 45 if communication else 90
 
-    # Adjustments
-    estimated += connectors * 25
-    estimated += list_items * 20
-    estimated += conditionals * 15
-    estimated += tech_refs * 15
+    # Adjustments (skip for continuation/verification - checking state stays fast)
+    if not (continuation or verification):
+        estimated += connectors * 25
+        estimated += list_items * 20
+        estimated += conditionals * 15
+        estimated += tech_refs * 15
 
-    if word_count > 30:
-        estimated += 40
+        if word_count > 30:
+            estimated += 40
 
     # Question cap
     if question and word_count <= 10:
         estimated = min(estimated, 20)
+    
+    # Continuation cap (checking existing state stays fast even with complexity)
+    if continuation:
+        estimated = min(estimated, 25)
 
     complexity_name = {1: 'simple', 2: 'normal', 3: 'complex'}[complexity]
 
@@ -495,6 +577,7 @@ def analyze_task(task: str) -> dict:
         'is_imperative': imperative,
         'is_communication': communication,
         'is_verification': verification,
+        'is_continuation': continuation,
         'is_confirmation': is_confirmation,
         'total_steps': total_steps,
         'technical_refs': tech_refs,
@@ -549,7 +632,7 @@ def main():
     reasoning = (
         f"words={analysis['word_count']} steps={analysis['total_steps']} "
         f"question={analysis['is_question']} imperative={analysis['is_imperative']} "
-        f"verification={analysis['is_verification']} "
+        f"verification={analysis['is_verification']} continuation={analysis['is_continuation']} "
         f"communication={analysis['is_communication']} confirmation={analysis['is_confirmation']} "
         f"tech_refs={analysis['technical_refs']} "
         f"→ time={estimated}s complexity={complexity_name} → {rec}"
