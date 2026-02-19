@@ -159,6 +159,13 @@ fi
 if echo "$TASK_LOWER" | grep -qE '\b(deploy|déploie|publish|publie|release|ship|merge|pr |pull request|push to|vercel|netlify|heroku|aws|gcp|azure)\b'; then
     CAT_DEPLOY=$((CAT_DEPLOY + 6))
 fi
+# Deployment validation/verification actions
+if echo "$TASK_LOWER" | grep -qE '\b(assure.?toi|assure.?toi que|ensure|make sure|vérifie que|vérife que|check that|synchronise|sync|met à jour|update)\b'; then
+    # These are technical action verbs BUT can be conversational too
+    # Only boost if followed by technical object (detected below)
+    CAT_DEPLOY=$((CAT_DEPLOY + 2))
+    CAT_CONFIG=$((CAT_CONFIG + 2))
+fi
 
 # --- Config/setup signals ---
 if echo "$TASK_LOWER" | grep -qE '\b(install|installe|configure|setup|set up|config|provision|bootstrap|init|initialize)\b'; then
@@ -166,6 +173,18 @@ if echo "$TASK_LOWER" | grep -qE '\b(install|installe|configure|setup|set up|con
 fi
 if echo "$TASK_LOWER" | grep -qE '\b(ssh|ssl|tls|cert|certificate|dns|domain|nginx|apache|proxy|firewall|port|env|environment)\b'; then
     CAT_CONFIG=$((CAT_CONFIG + 4))
+fi
+
+# --- Technical object detection (boosts deploy/config when present) ---
+# Presence of technical objects makes action verbs more significant
+HAS_TECHNICAL_OBJECT=false
+if echo "$TASK_LOWER" | grep -qE '\b(repo|repository|github|gitlab|bitbucket|git |npm|yarn|pnpm|docker|container|image|service|daemon|server|api|endpoint|database|db|version|package|module|lib|library|branch|main|master|prod|production|staging|dev)\b'; then
+    HAS_TECHNICAL_OBJECT=true
+    # Boost deploy/config categories when technical object is present
+    if [[ $CAT_DEPLOY -ge 2 || $CAT_CONFIG -ge 2 ]]; then
+        CAT_DEPLOY=$((CAT_DEPLOY + 6))
+        CAT_CONFIG=$((CAT_CONFIG + 4))
+    fi
 fi
 
 # ============================================================
