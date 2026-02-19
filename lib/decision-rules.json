@@ -57,7 +57,15 @@
       "allo",
       "hello",
       "salut",
-      "hi"
+      "hi",
+      "vas-y",
+      "allez",
+      "go",
+      "fais-le",
+      "lance",
+      "c'est bon",
+      "d'accord",
+      "okay"
     ],
     "keyword_weight_low": 5,
     "patterns": [

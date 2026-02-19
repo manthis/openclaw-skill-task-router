@@ -86,7 +86,11 @@ LABEL=$(echo "$TASK_LOWER" | sed 's/[^a-z0-9 ]//g' | awk '{for(i=1;i<=NF&&i<=4;i
 SPAWN_TOTAL=$((SONNET_SCORE + OPUS_SCORE))
 REC="spawn" MODEL="anthropic/claude-sonnet-4-5" MODEL_NAME="Sonnet" TIMEOUT=$SONNET_TIMEOUT COST="medium" PROT_OVERRIDE=false
 
-if [[ $DIRECT_SCORE -gt 0 && $DIRECT_SCORE -ge $SPAWN_TOTAL && ("$COMPLEXITY" == "simple" || "$COMPLEXITY" == "medium" || $DIRECT_SCORE -ge 10) ]]; then
+# If all scores are 0 → likely a conversation → execute_direct
+if [[ $DIRECT_SCORE -eq 0 && $SONNET_SCORE -eq 0 && $OPUS_SCORE -eq 0 ]]; then
+    REC="execute_direct" MODEL="" MODEL_NAME="" TIMEOUT=10 COST="low"
+    REASONING="Direct execution (all scores=0, likely conversation)"
+elif [[ $DIRECT_SCORE -gt 0 && $DIRECT_SCORE -ge $SPAWN_TOTAL && ("$COMPLEXITY" == "simple" || "$COMPLEXITY" == "medium" || $DIRECT_SCORE -ge 10) ]]; then
     REC="execute_direct" MODEL="" MODEL_NAME="" TIMEOUT=10 COST="low"
     REASONING="Direct execution (score: direct=${DIRECT_SCORE} vs spawn=${SPAWN_TOTAL})"
 elif [[ $OPUS_SCORE -gt $SONNET_SCORE || "$COMPLEXITY" == "complex" ]]; then
