@@ -448,8 +448,10 @@ fi
 
 # Output
 if [[ "$JSON_OUTPUT" == "true" ]]; then
+    # Escape quotes in TASK for JSON
+    TASK_ESCAPED=$(echo "$TASK" | sed 's/"/\\"/g' | sed "s/'/\\'/g")
     cat <<EOF
-{"recommendation":"${REC}","model":"${MODEL}","model_name":"${MODEL_NAME}","reasoning":"${REASONING}","command":"${CMD}","timeout_seconds":${TIMEOUT},"estimated_seconds":${ESTIMATED_SECONDS},"estimated_cost":"${COST}","complexity":"${COMPLEXITY_NAME}","category":"${DOMINANT}","protection_mode":$([[ "$PROTECTION" == "true" ]] && echo true || echo false),"protection_mode_override":$([[ "$PROT_OVERRIDE" == "true" ]] && echo true || echo false),"label":"${LABEL}","dry_run":$([[ "$DRY_RUN" == "true" ]] && echo true || echo false)}
+{"recommendation":"${REC}","model":"${MODEL}","model_name":"${MODEL_NAME}","reasoning":"${REASONING}","command":"${CMD}","timeout_seconds":${TIMEOUT},"estimated_seconds":${ESTIMATED_SECONDS},"estimated_cost":"${COST}","complexity":"${COMPLEXITY_NAME}","category":"${DOMINANT}","protection_mode":$([[ "$PROTECTION" == "true" ]] && echo true || echo false),"protection_mode_override":$([[ "$PROT_OVERRIDE" == "true" ]] && echo true || echo false),"label":"${LABEL}","dry_run":$([[ "$DRY_RUN" == "true" ]] && echo true || echo false),"user_message":"${TASK_ESCAPED}"}
 EOF
 else
     echo ""
