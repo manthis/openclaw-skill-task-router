@@ -217,6 +217,66 @@ def is_communication_verb(first_word_norm, text_norm):
     return False
 
 
+def is_verification_question(text_norm, question):
+    """Detect verification/status questions that are fast even if long.
+    
+    Verification questions ask about current state, not requesting actions.
+    They're fast to answer (check files/status) even if checking multiple things.
+    
+    Patterns:
+        - "tu as [fait/mis à jour/...]" → verification
+        - "est-ce que X est [à jour/synchronisé/...]" → verification
+        - "X est [correct/terminé/...]" → verification
+        - Contains status markers: "à jour", "synchronisé", "correct", "fait", "terminé"
+    
+    Examples:
+        ✓ "tu as mis à jour le task router et la skill ?" → verification (fast)
+        ✓ "le repo github est à jour ?" → verification (fast)
+        ✓ "tout est synchronisé ?" → verification (fast)
+        ✗ "mets à jour le task router" → action (slow)
+        ✗ "synchronise le repo github" → action (slow)
+    """
+    if not question:
+        return False
+    
+    # Status/verification markers (things we check, not do)
+    # Use past participles/adjectives, not infinitive verbs
+    verification_markers = {
+        'a jour', 'synchronise', 'correct', 'fait', 'termine', 'fini',
+        'up to date', 'synced', 'done', 'complete', 'ready', 'pret',
+        'updated', 'deployed', 'deploye', 'installed', 'installe',
+        'configured', 'ok', 'good', 'bon',
+    }
+    
+    # Imperative verbs (actions to perform, not states to check)
+    # If these appear at start of sentence without past tense markers, it's an action
+    action_verbs = {
+        'synchronise', 'synchroniser', 'sync',
+        'deploie', 'deployer', 'deploy',
+        'installe', 'installer', 'install',
+        'configure', 'configurer', 'setup',
+        'mets', 'mettre', 'met', 'update',
+        'cree', 'creer', 'create',
+    }
+    
+    # Check if it's an imperative action (verb at start)
+    words = text_norm.split()
+    if words and words[0] in action_verbs:
+        return False  # "synchronise le repo" → action, not verification
+    
+    # Past tense/status check patterns (indicating completed actions we're verifying)
+    past_patterns = {
+        'tu as', 'you have', 'have you', 'as tu', 'did you',
+        'est ce que', 'is it', 'are they', 'sont ils',
+    }
+    
+    # Check for verification markers
+    has_verification_marker = any(marker in text_norm for marker in verification_markers)
+    has_past_pattern = any(pattern in text_norm for pattern in past_patterns)
+    
+    return has_verification_marker or has_past_pattern
+
+
 def is_short_confirmation(text_norm, word_count, first_word_norm):
     """Detect short conversational confirmations/corrections.
     
@@ -316,6 +376,7 @@ def analyze_task(task: str) -> dict:
     trivial = is_trivial_message(text_norm, word_count)
     imperative = detect_imperative(first_word_norm, question, word_count)
     communication = is_communication_verb(first_word_norm, text_norm) if imperative else False
+    verification = is_verification_question(text_norm, question)
     connectors = count_connectors(text_norm)
     list_items = count_list_items(text)
     sentences = count_sentences(text)
@@ -375,6 +436,16 @@ def analyze_task(task: str) -> dict:
         estimated = 5
     elif trivial:
         estimated = 5
+    elif verification:
+        # Verification/status questions are ALWAYS fast, even if long
+        # Checking multiple things (files, repos, status) is still quick
+        # Examples: "tu as mis à jour X et Y et Z ?" → just check, don't do
+        if word_count <= 10:
+            estimated = 10
+        elif word_count <= 20:
+            estimated = 15
+        else:
+            estimated = 20  # Even long verification questions are < 30s
     elif word_count <= 2 and not imperative:
         estimated = 5
     elif word_count <= 2 and imperative:
@@ -423,6 +494,7 @@ def analyze_task(task: str) -> dict:
         'is_question': question,
         'is_imperative': imperative,
         'is_communication': communication,
+        'is_verification': verification,
         'is_confirmation': is_confirmation,
         'total_steps': total_steps,
         'technical_refs': tech_refs,
@@ -477,6 +549,7 @@ def main():
     reasoning = (
         f"words={analysis['word_count']} steps={analysis['total_steps']} "
         f"question={analysis['is_question']} imperative={analysis['is_imperative']} "
+        f"verification={analysis['is_verification']} "
         f"communication={analysis['is_communication']} confirmation={analysis['is_confirmation']} "
         f"tech_refs={analysis['technical_refs']} "
         f"→ time={estimated}s complexity={complexity_name} → {rec}"
