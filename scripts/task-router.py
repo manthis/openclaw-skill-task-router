@@ -190,8 +190,6 @@ def main():
     # Decision
     if estimated <= 30:
         rec = 'execute_direct'
-    elif estimated <= 120:
-        rec = 'execute_direct' if complexity <= 1 else 'spawn'
     else:
         rec = 'spawn'
 
