@@ -151,6 +151,122 @@ def detect_imperative(first_word_norm, question, word_count):
     return first_word_norm not in non_action
 
 
+def is_communication_verb(first_word_norm, text_norm):
+    """Detect if imperative is a communication verb (fast) vs action verb (slow).
+    
+    Communication verbs: announce, tell, show, display, explain, present
+    Action verbs: create, build, develop, implement, deploy, install
+    
+    Context matters: "annoncer les résultats" (communication) vs "créer les résultats" (action)
+    """
+    # Communication verbs (fast, conversational)
+    comm_verbs = {
+        'annoncer', 'annonce', 'dire', 'dis', 'montrer', 'montre',
+        'afficher', 'affiche', 'expliquer', 'explique', 'presenter', 'presente',
+        'tell', 'show', 'display', 'announce', 'present', 'explain',
+        'rappeler', 'rappelle', 'indiquer', 'indique', 'signaler', 'signale',
+        'informer', 'informe', 'notify', 'inform', 'remind',
+    }
+    
+    # Action verbs (slow, production)
+    action_verbs = {
+        'creer', 'cree', 'construire', 'construis', 'developper', 'developpe',
+        'implementer', 'implemente', 'deployer', 'deploie', 'installer', 'installe',
+        'create', 'build', 'develop', 'implement', 'deploy', 'install',
+        'configurer', 'configure', 'setup', 'initialiser', 'initialise',
+    }
+    
+    # Check verb type
+    is_comm = first_word_norm in comm_verbs
+    is_action = first_word_norm in action_verbs
+    
+    # If not explicitly in lists, check context
+    if not is_comm and not is_action:
+        return False  # Unknown verb, treat as action (conservative)
+    
+    # If communication verb, check object context
+    if is_comm:
+        # Communication objects (info, results, status) → fast
+        comm_objects = {
+            'resultat', 'resultats', 'info', 'infos', 'information', 'informations',
+            'status', 'statut', 'etat', 'message', 'messages', 'nouvelle', 'nouvelles',
+            'update', 'updates', 'summary', 'resume', 'rapport', 'report',
+            'result', 'results', 'data', 'donnees', 'news',
+        }
+        
+        # Check if any comm object appears in text
+        for obj in comm_objects:
+            if obj in text_norm:
+                return True
+        
+        # Action objects (code, service, system) → slow even with comm verb
+        action_objects = {
+            'code', 'service', 'services', 'systeme', 'system', 'infrastructure',
+            'api', 'endpoint', 'database', 'server', 'serveur', 'application',
+            'app', 'fonction', 'function', 'module', 'component', 'composant',
+        }
+        
+        for obj in action_objects:
+            if obj in text_norm:
+                return False
+        
+        # Default: communication verb without clear context → assume communication
+        return True
+    
+    # Action verb → definitely not communication
+    return False
+
+
+def is_short_confirmation(text_norm, word_count, first_word_norm):
+    """Detect short conversational confirmations/corrections.
+    
+    Pattern: Short message (≤ 10 words) starting with affirmation/negation
+    Examples:
+        - "Non c'était bien le spawn sonnet" → True (confirmation)
+        - "Oui c'est le bon routage" → True (confirmation)
+        - "Exactement ça marche bien" → True (confirmation)
+        - "Non déploie avec Sonnet" → False (action with imperative)
+    
+    Even if technical terms appear, if it starts with yes/no and is short,
+    it's likely a conversational reference, not a technical action.
+    """
+    if word_count > 10:
+        return False
+    
+    # Affirmation/negation openers
+    confirmation_starters = {
+        'non', 'oui', 'si', 'yes', 'no', 'yeah', 'nope', 'yep',
+        'exactement', 'exactly', 'tout', 'pas', 'absolument', 'absolutely',
+        'indeed', 'correct', 'indeed', 'right', 'wrong', 'faux', 'vrai',
+        'true', 'false',
+    }
+    
+    if first_word_norm not in confirmation_starters:
+        return False
+    
+    # Check for action verbs that would make it a command, not confirmation
+    # Split into words and check second/third word
+    words = text_norm.split()
+    if len(words) < 2:
+        return True  # Just "yes" or "no" alone
+    
+    # Action verbs that indicate a command, not a confirmation
+    action_verbs = {
+        'deploie', 'deploy', 'lance', 'run', 'execute', 'cree', 'create',
+        'fais', 'do', 'make', 'installe', 'install', 'configure', 'setup',
+        'supprime', 'delete', 'remove', 'modifie', 'modify', 'change',
+        'corrige', 'fix', 'debug', 'teste', 'test', 'verifie', 'check',
+    }
+    
+    # Check if any word (except first) is an action verb
+    for word in words[1:]:
+        if word in action_verbs:
+            return False  # It's a command like "Non déploie avec X"
+    
+    # It's a confirmation/correction
+    return True
+
+
 def is_ambiguous_task(analysis):
     """Detect ambiguous tasks that need user clarification.
     
@@ -199,6 +315,7 @@ def analyze_task(task: str) -> dict:
     question = is_question(text, first_word_norm)
     trivial = is_trivial_message(text_norm, word_count)
     imperative = detect_imperative(first_word_norm, question, word_count)
+    communication = is_communication_verb(first_word_norm, text_norm) if imperative else False
     connectors = count_connectors(text_norm)
     list_items = count_list_items(text)
     sentences = count_sentences(text)
@@ -250,17 +367,25 @@ def analyze_task(task: str) -> dict:
         complexity = 1
 
     # ── Time estimation ──
-    if trivial:
+    # Check for short confirmations FIRST (before other checks)
+    is_confirmation = is_short_confirmation(text_norm, word_count, first_word_norm)
+    
+    if is_confirmation:
+        # Short conversational confirmation/correction → fast response
+        estimated = 5
+    elif trivial:
         estimated = 5
     elif word_count <= 2 and not imperative:
         estimated = 5
     elif word_count <= 2 and imperative:
-        # Short imperative like "debug endpoint" or "crée API"
-        estimated = 50
+        # Short imperative: communication (fast) vs action (slow)
+        estimated = 10 if communication else 50
     elif word_count <= 4 and not imperative:
         estimated = 10
     elif word_count <= 4 and imperative:
-        estimated = 50
+        # Communication verb (announce results, tell me, show status) → fast
+        # Action verb (create API, deploy service, build system) → slow
+        estimated = 15 if communication else 50
     elif question and word_count <= 10:
         estimated = 15
     elif question and word_count <= 20:
@@ -268,11 +393,12 @@ def analyze_task(task: str) -> dict:
     elif question:
         estimated = 45
     elif word_count <= 8:
-        estimated = 35
+        # Still check for communication verbs in longer sentences
+        estimated = 20 if communication else 35
     elif word_count <= 15:
-        estimated = 60
+        estimated = 30 if communication else 60
     else:
-        estimated = 90
+        estimated = 45 if communication else 90
 
     # Adjustments
     estimated += connectors * 25
@@ -296,6 +422,8 @@ def analyze_task(task: str) -> dict:
         'word_count': word_count,
         'is_question': question,
         'is_imperative': imperative,
+        'is_communication': communication,
+        'is_confirmation': is_confirmation,
         'total_steps': total_steps,
         'technical_refs': tech_refs,
         'text': text,
@@ -349,6 +477,7 @@ def main():
     reasoning = (
         f"words={analysis['word_count']} steps={analysis['total_steps']} "
         f"question={analysis['is_question']} imperative={analysis['is_imperative']} "
+        f"communication={analysis['is_communication']} confirmation={analysis['is_confirmation']} "
         f"tech_refs={analysis['technical_refs']} "
         f"→ time={estimated}s complexity={complexity_name} → {rec}"
     )
