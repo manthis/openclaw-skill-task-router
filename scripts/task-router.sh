@@ -179,10 +179,11 @@ generate_label() {
 
 # Main routing logic
 route_task() {
-    local direct_score opus_score sonnet_score
+    local direct_score opus_score sonnet_score conversation_score
     direct_score=$(count_matches "execute_direct")
     sonnet_score=$(count_matches "spawn_sonnet")
     opus_score=$(count_matches "spawn_opus")
+    conversation_score=$(count_matches "conversation")
     
     local complexity
     complexity=$(estimate_complexity)
@@ -198,16 +199,26 @@ route_task() {
     local cost="medium"
     local protection_override=false
     
-    # If both direct and spawn keywords are present, spawn wins (mixed intent = action needed)
     local spawn_total=$((sonnet_score + opus_score))
     
-    # Decision logic
-    # Direct execution wins if it has highest score, no significant spawn keywords, AND (simple complexity OR dominant score)
-    if [[ $direct_score -gt $sonnet_score && $direct_score -gt $opus_score && $spawn_total -lt 5 && ( "$complexity" == "simple" || $direct_score -ge 10 ) ]]; then
+    # Decision logic:
+    # 1. Conversation: highest conversation score, no spawn keywords, simple task
+    # 2. Execute direct: highest direct score, no significant spawn keywords
+    # 3. Spawn Opus: opus keywords or complex task
+    # 4. Spawn Sonnet: default fallback
+    
+    if [[ $conversation_score -gt 0 && $spawn_total -eq 0 && $direct_score -eq 0 && "$complexity" == "simple" ]]; then
+        recommendation="conversation"
+        model=""
+        model_name=""
+        reasoning="Simple conversational response. Keywords matched: conversation=${conversation_score}."
+        timeout=5
+        cost="none"
+    elif [[ $direct_score -gt 0 && $direct_score -ge $spawn_total && ( "$complexity" == "simple" || "$complexity" == "medium" || $direct_score -ge 10 ) ]]; then
         recommendation="execute_direct"
         model=""
         model_name=""
-        reasoning="Task matches direct execution patterns (simple, quick). Keywords matched: ${direct_score}."
+        reasoning="Task matches direct execution patterns (simple, quick). Keywords matched: direct=${direct_score}, spawn=${spawn_total}."
         timeout=10
         cost="low"
     elif [[ $opus_score -gt $sonnet_score || "$complexity" == "complex" ]]; then
