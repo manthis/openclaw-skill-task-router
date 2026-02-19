@@ -79,13 +79,35 @@ $ PROTECTION_MODE=true task-router.sh --task "Debug complex bug" --json
 
 1. **Text metrics** — word count, sentence count, list items
 2. **Grammar signals** — connectors, conditionals, technical references
-3. **Task type detection** — questions, imperatives, trivial messages
+3. **Task type detection** — questions, imperatives, trivial messages, **verification questions**
 4. **Time estimation** — based on complexity indicators
 5. **Smart routing:**
    - `< 30s` → `execute_direct`
    - `≥ 30s + ambiguous` → `ask_user` (prompt for clarification)
    - `≥ 30s + normal` → spawn Sonnet
    - `≥ 30s + complex` → spawn Opus
+
+### Verification Questions Detection
+
+Verification/status questions are **always fast** (< 30s) even if long:
+
+```bash
+# ✅ Verification → execute_direct
+"tu as mis à jour le task router et la skill ?"           # 15s
+"le repo github est à jour ?"                             # 10s
+"super tu as mis à jour X et Y et Z ?"                    # 20s
+"tout est synchronisé ?"                                  # 5s
+
+# ❌ Actions → spawn
+"mets à jour le task router"                              # 60s spawn
+"synchronise le repo github"                              # 50s spawn
+```
+
+**Key distinction:**
+- "tu as [fait] X ?" → verification (check state) → fast
+- "fais X" → action (perform work) → slow
+
+Markers: `à jour`, `synchronisé`, `fait`, `terminé`, `correct`, `deployed`, `installed`, etc.
 
 ## Tests
 
