@@ -33,6 +33,11 @@ WORD_COUNT=$(echo "$TASK" | wc -w | tr -d ' ')
 # A task can match multiple categories; we take the dominant one.
 # ============================================================
 
+# Pre-compute question detection for tie-breaking
+IS_QUESTION_EARLY=false
+if echo "$TASK_LOWER" | grep -qE '\?$'; then IS_QUESTION_EARLY=true; fi
+if echo "$TASK_LOWER" | grep -qE '^\s*(c.est quoi|qu.est-ce que|what is|what.s|why does|pourquoi|how |comment |explique|explain|describe|décris)'; then IS_QUESTION_EARLY=true; fi
+
 # Category scores (0 = no match, higher = stronger signal)
 CAT_CONVERSATION=0   # greetings, chat, opinions, simple Q&A
 CAT_LOOKUP=0         # check status, read info, weather, time, calendar
@@ -125,8 +130,12 @@ if echo "$TASK_LOWER" | grep -qE '\b(refactor|refactorise|optimize|optimise|clea
 fi
 
 # --- Debug/fix signals ---
-if echo "$TASK_LOWER" | grep -qE '\b(debug|debugge|fix|corrige|résous|resolve|troubleshoot|diagnose|diagnostique)\b'; then
-    CAT_DEBUG=$((CAT_DEBUG + 7))
+# Imperative debug verbs (actual work requested) vs informational
+if echo "$TASK_LOWER" | grep -qE '\b(fix|corrige|résous|resolve|troubleshoot|répare)\b'; then
+    CAT_DEBUG=$((CAT_DEBUG + 8))  # Strong: clearly requesting action
+fi
+if echo "$TASK_LOWER" | grep -qE '\b(debug|debugge|diagnose|diagnostique)\b'; then
+    CAT_DEBUG=$((CAT_DEBUG + 6))  # Medium: could be question or action
 fi
 if echo "$TASK_LOWER" | grep -qE '\b(error|erreur|bug|issue|broken|cassé|crash|fail|failed|marche pas|doesn.t work|not working|problem|problème|weird|bizarre|strange|étrange)\b'; then
     CAT_DEBUG=$((CAT_DEBUG + 5))
@@ -179,6 +188,16 @@ done
 # If no strong signal at all (max_score <= 2), treat as conversation
 if [[ $MAX_SCORE -le 2 ]]; then
     DOMINANT="conversation"
+fi
+
+# Tie-breaking: if conversation score is close to dominant AND it's a short question,
+# prefer conversation (asking about something ≠ doing something)
+if [[ "$DOMINANT" != "conversation" && "$IS_QUESTION_EARLY" == "true" && $WORD_COUNT -le 6 ]]; then
+    SCORE_DIFF=$((MAX_SCORE - CAT_CONVERSATION))
+    if [[ $SCORE_DIFF -le 3 ]]; then
+        DOMINANT="conversation"
+        MAX_SCORE=$CAT_CONVERSATION
+    fi
 fi
 
 # Map dominant category → base time estimate + complexity level
@@ -235,6 +254,51 @@ case "$DOMINANT" in
         COMPLEXITY_NAME="normal"
         ;;
 esac
+
+# ============================================================
+# STEP 2b: QUESTION DAMPENER
+# Short questions about technical topics are usually asking for
+# an explanation, not requesting actual work. Downgrade them.
+# "C'est quoi cette erreur ?" → conversation, not debug
+# "Why does X fail?" → lookup/explanation, not full troubleshooting
+# ============================================================
+
+IS_QUESTION=false
+if echo "$TASK_LOWER" | grep -qE '\?$'; then
+    IS_QUESTION=true
+fi
+if echo "$TASK_LOWER" | grep -qE '^\s*(c.est quoi|qu.est-ce que|what is|what.s|why does|why is|pourquoi|how does|how is|comment ça|explique|explain|describe|décris)'; then
+    IS_QUESTION=true
+fi
+
+# Short question (≤ 8 words) + high-complexity category → downgrade
+if [[ "$IS_QUESTION" == "true" && $WORD_COUNT -le 8 ]]; then
+    if [[ "$DOMINANT" == "debug" || "$DOMINANT" == "code" || "$DOMINANT" == "architecture" ]]; then
+        # It's an explanation question, not actual work
+        # Downgrade to simple/normal depending on signals
+        if [[ $WORD_COUNT -le 5 ]]; then
+            COMPLEXITY=1
+            COMPLEXITY_NAME="simple"
+            BASE_TIME=15
+        else
+            COMPLEXITY=2
+            COMPLEXITY_NAME="normal"
+            BASE_TIME=25
+        fi
+    fi
+fi
+
+# Medium-length questions (≤ 12 words) + question words → cap complexity
+if [[ "$IS_QUESTION" == "true" && $WORD_COUNT -le 12 ]]; then
+    if echo "$TASK_LOWER" | grep -qE '^\s*(c.est quoi|qu.est-ce que|what is|what.s|explain|explique|how does|comment|describe|décris)'; then
+        # Explanation-type questions: cap at normal complexity
+        if [[ $COMPLEXITY -ge 3 ]]; then
+            COMPLEXITY=2
+            COMPLEXITY_NAME="normal"
+            BASE_TIME=$((BASE_TIME < 40 ? BASE_TIME : 40))
+        fi
+    fi
+fi
 
 # ============================================================
 # STEP 3: ADJUST TIME BASED ON SCOPE SIGNALS
