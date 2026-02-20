@@ -3,7 +3,9 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![OpenClaw Skill](https://img.shields.io/badge/OpenClaw-Skill-blue.svg)](https://github.com/manthis/openclaw-skill-task-router)
 
-Intelligent task routing CLI for OpenClaw — analyzes tasks and recommends spawn vs direct execution, model selection, and generates commands.
+**Model selector for OpenClaw sub-agents** — analyzes tasks to delegate and recommends which model (Opus vs Sonnet) to use, with timeout and cost estimates.
+
+> **Not a universal message router.** The agent handles conversational messages directly. This tool is only called when the agent has decided to spawn a sub-agent.
 
 ## Quick Start
 
@@ -14,23 +16,37 @@ git clone https://github.com/manthis/openclaw-skill-task-router.git ~/.openclaw/
 # Symlink for easy access
 ln -sf ~/.openclaw/workspace/skills/openclaw-skill-task-router/scripts/task-router.sh ~/bin/task-router.sh
 
-# Use it
-task-router.sh --task "Read HEARTBEAT.md"
-# ⚡ EXECUTE DIRECTLY
-
-task-router.sh --task "Create a new skill and publish on GitHub" --json
+# Use it (when you've decided to spawn)
+task-router.sh --task "Refactor authentication module" --json --no-notify
 # { "recommendation": "spawn", "model": "anthropic/claude-opus-4-6", ... }
+
+task-router.sh --task "Write a summary email" --json --no-notify
+# { "recommendation": "spawn", "model": "anthropic/claude-sonnet-4-5", ... }
+```
+
+## Workflow
+
+The agent decides when to spawn — task-router decides **which model**:
+
+```
+User message
+    │
+    ├── Conversational? → Agent responds directly (no task-router)
+    │
+    └── Needs delegation? → task-router.sh --task "..." --json --no-notify
+                                │
+                                ├── Normal task → Sonnet
+                                └── Complex task → Opus
 ```
 
 ## Features
 
-- **Structural analysis** — NO regex, NO keyword dictionaries, pure linguistic signals
+- **Structural analysis** — linguistic signals, not keyword dictionaries
 - **Complexity estimation** from word count, grammar, and task structure
-- **Smart routing** — `ask_user` for ambiguous tasks, automatic model selection
 - **Model selection** (Opus / Sonnet) based on estimated complexity
-- **Protection mode** awareness — respects budget constraints
+- **Protection mode** awareness — respects budget constraints (Opus → Sonnet)
+- **User message generation** — ready-to-send feedback for the user
 - **Command generation** — ready-to-use spawn commands
-- **JSON or human-readable** output
 
 ## Usage
 
@@ -42,30 +58,36 @@ Options:
   --json                  Output as JSON
   --check-protection      Check if protection mode is active
   --dry-run               Simulation mode
+  --no-notify             No Telegram notification (default)
+  --use-notify            Send Telegram notification via spawn-notify.sh
   -h, --help              Show help
 ```
 
 ## Examples
 
 ```bash
-# Simple task → execute directly
-$ task-router.sh --task "Check git status"
-⚡ EXECUTE DIRECTLY
-  Complexity: simple
-  Reasoning: Task matches direct execution patterns...
+# Normal task → Sonnet
+$ task-router.sh --task "Write API documentation for the auth module" --json
+{
+  "recommendation": "spawn",
+  "model": "anthropic/claude-sonnet-4-5",
+  "complexity": "normal",
+  "estimated_seconds": 50,
+  ...
+}
 
-# Complex task → spawn with Opus
-$ task-router.sh --task "Refactor authentication and deploy" --json
+# Complex task → Opus
+$ task-router.sh --task "Refactor authentication, add tests, and fix the race condition" --json
 {
   "recommendation": "spawn",
   "model": "anthropic/claude-opus-4-6",
-  "timeout_seconds": 1800,
-  "estimated_cost": "high",
+  "complexity": "complex",
+  "estimated_seconds": 120,
   ...
 }
 
 # Protection mode → forces Sonnet
-$ PROTECTION_MODE=true task-router.sh --task "Debug complex bug" --json
+$ PROTECTION_MODE=true task-router.sh --task "Debug complex distributed bug" --json
 {
   "model": "anthropic/claude-sonnet-4-5",
   "protection_mode_override": true,
@@ -77,37 +99,13 @@ $ PROTECTION_MODE=true task-router.sh --task "Debug complex bug" --json
 
 **Pure structural analysis — no configuration needed:**
 
-1. **Text metrics** — word count, sentence count, list items
-2. **Grammar signals** — connectors, conditionals, technical references
-3. **Task type detection** — questions, imperatives, trivial messages, **verification questions**
-4. **Time estimation** — based on complexity indicators
-5. **Smart routing:**
-   - `< 30s` → `execute_direct`
-   - `≥ 30s + ambiguous` → `ask_user` (prompt for clarification)
-   - `≥ 30s + normal` → spawn Sonnet
-   - `≥ 30s + complex` → spawn Opus
-
-### Verification Questions Detection
-
-Verification/status questions are **always fast** (< 30s) even if long:
-
-```bash
-# ✅ Verification → execute_direct
-"tu as mis à jour le task router et la skill ?"           # 15s
-"le repo github est à jour ?"                             # 10s
-"super tu as mis à jour X et Y et Z ?"                    # 20s
-"tout est synchronisé ?"                                  # 5s
-
-# ❌ Actions → spawn
-"mets à jour le task router"                              # 60s spawn
-"synchronise le repo github"                              # 50s spawn
-```
-
-**Key distinction:**
-- "tu as [fait] X ?" → verification (check state) → fast
-- "fais X" → action (perform work) → slow
-
-Markers: `à jour`, `synchronisé`, `fait`, `terminé`, `correct`, `deployed`, `installed`, etc.
+1. **Categorization** — identifies task type (code, debug, content, search, deploy, config, etc.)
+2. **Complexity scoring** — word count, multi-step indicators, combined categories
+3. **Time estimation** — based on category + scope signals
+4. **Model selection:**
+   - Normal complexity (≤2) → **Sonnet**
+   - Complex (3) → **Opus**
+   - Protection mode active → always **Sonnet**
 
 ## Tests
 
@@ -119,10 +117,6 @@ Markers: `à jour`, `synchronisé`, `fait`, `terminé`, `correct`, `deployed`, `
 
 - `bash` (4.0+)
 - `jq`
-
-## Related
-
-- [openclaw-skill-orchestrator-config](https://github.com/manthis/openclaw-skill-orchestrator-config) — Templates and docs for orchestration
 
 ## License
 

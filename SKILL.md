@@ -2,16 +2,18 @@
 
 ## Purpose
 
-CLI tool that analyzes task descriptions and recommends whether to execute directly or spawn a sub-agent, which model to use, and generates the appropriate command.
+**Model selector for sub-agents.** When the main agent decides to spawn a sub-agent, this tool analyzes the task and recommends which model (Opus vs Sonnet) to use, with timeout and cost estimates.
+
+**This is NOT a universal message router.** The agent handles conversational messages directly. This tool is only called when a task needs delegation.
 
 ## Usage
 
 ```bash
-# Basic usage
-task-router.sh --task "description"
+# Basic usage — when you've decided to spawn
+task-router.sh --task "description of the task to delegate"
 
-# JSON output
-task-router.sh --task "description" --json
+# JSON output (recommended for programmatic use)
+task-router.sh --task "description" --json --no-notify
 
 # Check protection mode
 task-router.sh --task "description" --check-protection
@@ -22,22 +24,44 @@ task-router.sh --task "description" --dry-run
 
 ## How It Works
 
-1. Parses the task description
-2. Matches keywords against decision rules (`lib/decision-rules.json`)
-3. Estimates task complexity
-4. Selects appropriate model (Opus/Sonnet/Codex)
-5. Checks protection mode status
-6. Generates spawn command with timeout and label
-7. Outputs recommendation (JSON or human-readable)
+1. Analyzes the task description (category, complexity, scope)
+2. Estimates execution time and cognitive complexity
+3. Selects appropriate model:
+   - **Sonnet** → normal tasks (write, search, modify, deploy, content)
+   - **Opus** → complex tasks (debug, refactor, architecture, multi-step code)
+4. Checks protection mode (budget constraints → Opus downgraded to Sonnet)
+5. Generates spawn command with timeout and label
+6. Returns `user_message` for immediate feedback to user
 
-## Decision Logic
+## Decision Matrix
 
-| Category | Keywords | Model | Timeout |
-|----------|----------|-------|---------|
-| Direct | read, check, list, show, get | None | 10s |
-| Sonnet | write, create, format, search, analyze | Sonnet | 600s |
-| Opus | build, fix, debug, audit, refactor | Opus | 1800s |
-| Codex | fallback, general | Codex | 600s |
+```
+              | Normal (≤2)      | Complex (3)
+--------------|------------------|------------------
+30-120s       | spawn Sonnet     | spawn Opus
+> 120s        | spawn Sonnet     | spawn Opus
+```
+
+Protection mode: Opus → Sonnet downgrade when budget threshold exceeded.
+
+## Output (JSON)
+
+```json
+{
+  "recommendation": "spawn",
+  "model": "anthropic/claude-opus-4-6",
+  "model_name": "Opus",
+  "complexity": "complex",
+  "category": "debug",
+  "estimated_seconds": 90,
+  "timeout_seconds": 450,
+  "estimated_cost": "high",
+  "user_message": "Ok, je lance un sub-agent Opus pour debug (~90s)",
+  "label": "fix-auth-bug",
+  "protection_mode": false,
+  "protection_mode_override": false
+}
+```
 
 ## Dependencies
 
@@ -46,7 +70,6 @@ task-router.sh --task "description" --dry-run
 
 ## Configuration
 
-- Decision rules: `lib/decision-rules.json`
 - Model config: `lib/model-config.json`
 - Protection mode state: `$OPENCLAW_WORKSPACE/memory/claude-usage-state.json`
 

@@ -121,12 +121,11 @@ fi
 if echo "$TASK_LOWER" | grep -qE '\b(skill|plugin|tool|bot|cli|daemon|service|worker|cron|webhook|docker|container|k8s|kubernetes)\b'; then
     CAT_CODE=$((CAT_CODE + 5))
 fi
-if echo "$TASK_LOWER" | grep -qE '\b(test|tests|spec|unittest|jest|pytest|ci|cd|pipeline|lint|eslint|prettier|type.?check)\b'; then
-    CAT_CODE=$((CAT_CODE + 4))
+if echo "$TASK_LOWER" | grep -qE '\b(test|tests|spec|unittest|jest|pytest|ci|cd|pipeline|lint|eslint|prettier|type.?check|e2e|integration.?test|coverage)\b'; then
+    CAT_CODE=$((CAT_CODE + 6))
 fi
-if echo "$TASK_LOWER" | grep -qE '\b(refactor|refactorise|optimize|optimise|clean.?up|restructure)\b'; then
-    CAT_CODE=$((CAT_CODE + 5))
-    CAT_FILEMOD=$((CAT_FILEMOD + 3))
+if echo "$TASK_LOWER" | grep -qE '\b(refactor[ei]?|refactorise|optimize|optimise|clean.?up|restructure)\b'; then
+    CAT_CODE=$((CAT_CODE + 7))
 fi
 
 # --- Debug/fix signals ---
@@ -185,6 +184,23 @@ if echo "$TASK_LOWER" | grep -qE '\b(repo|repository|github|gitlab|bitbucket|git
         CAT_DEPLOY=$((CAT_DEPLOY + 6))
         CAT_CONFIG=$((CAT_CONFIG + 4))
     fi
+fi
+
+# ============================================================
+# STEP 1b: POST-PROCESSING — resolve code vs filemod conflicts
+# When strong code signals (refactor, tests, CI) are present,
+# filemod signals from generic verbs (ajoute, modifie) should
+# not override the code category.
+# ============================================================
+if [[ $CAT_CODE -ge 10 && $CAT_FILEMOD -gt 0 && $CAT_FILEMOD -lt $CAT_CODE ]]; then
+    # Strong code signals dominate — suppress filemod
+    CAT_FILEMOD=$((CAT_FILEMOD / 2))
+fi
+
+# When multiple complex categories combine (code+debug, code+architecture),
+# boost architecture if both code and another complex category are strong
+if [[ $CAT_CODE -ge 6 && $CAT_DEBUG -ge 5 ]]; then
+    CAT_ARCHITECTURE=$((CAT_ARCHITECTURE + 3))
 fi
 
 # ============================================================
@@ -401,7 +417,8 @@ MODEL="" MODEL_NAME="" TIMEOUT=10 COST="low"
 if [[ "$REC" == "spawn" ]]; then
     if [[ $COMPLEXITY -ge 3 ]]; then
         MODEL="anthropic/claude-opus-4-6" MODEL_NAME="Opus" COST="high"
-        TIMEOUT=$((ESTIMATED_SECONDS * 3 > 1800 ? 1800 : ESTIMATED_SECONDS * 3))
+        # ×5 multiplier for complex tasks (code/debug/architecture need more time)
+        TIMEOUT=$((ESTIMATED_SECONDS * 5 > 1800 ? 1800 : ESTIMATED_SECONDS * 5))
     else
         MODEL="anthropic/claude-sonnet-4-5" MODEL_NAME="Sonnet" COST="medium"
         TIMEOUT=$((ESTIMATED_SECONDS * 3 > 600 ? 600 : ESTIMATED_SECONDS * 3))

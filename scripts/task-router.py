@@ -624,7 +624,7 @@ def main():
     if rec == 'spawn':
         if complexity >= 3:
             model, model_name, cost = 'anthropic/claude-opus-4-6', 'Opus', 'high'
-            timeout = min(estimated * 3, 1800)
+            timeout = min(estimated * 5, 1800)  # ×5 for complex tasks
         else:
             model, model_name, cost = 'anthropic/claude-sonnet-4-5', 'Sonnet', 'medium'
             timeout = min(estimated * 3, 600)

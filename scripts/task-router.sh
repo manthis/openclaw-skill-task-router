@@ -1,6 +1,6 @@
 #!/bin/bash
-# task-router.sh — Two-axis task routing: Time × Complexity → Decision
-# Estimates execution time AND cognitive complexity independently, then decides.
+# task-router.sh — Model selector for sub-agents: analyzes task → recommends Opus vs Sonnet
+# Called when the agent has decided to spawn. NOT a universal message router.
 # Usage: task-router.sh --task "description" [--json] [--check-protection] [--dry-run] [--no-notify]
 set -euo pipefail
 
@@ -121,12 +121,11 @@ fi
 if echo "$TASK_LOWER" | grep -qE '\b(skill|plugin|tool|bot|cli|daemon|service|worker|cron|webhook|docker|container|k8s|kubernetes)\b'; then
     CAT_CODE=$((CAT_CODE + 5))
 fi
-if echo "$TASK_LOWER" | grep -qE '\b(test|tests|spec|unittest|jest|pytest|ci|cd|pipeline|lint|eslint|prettier|type.?check)\b'; then
-    CAT_CODE=$((CAT_CODE + 4))
+if echo "$TASK_LOWER" | grep -qE '\b(test|tests|spec|unittest|jest|pytest|ci|cd|pipeline|lint|eslint|prettier|type.?check|e2e|integration.?test|coverage)\b'; then
+    CAT_CODE=$((CAT_CODE + 6))
 fi
-if echo "$TASK_LOWER" | grep -qE '\b(refactor|refactorise|optimize|optimise|clean.?up|restructure)\b'; then
-    CAT_CODE=$((CAT_CODE + 5))
-    CAT_FILEMOD=$((CAT_FILEMOD + 3))
+if echo "$TASK_LOWER" | grep -qE '\b(refactor[ei]?|refactorise|optimize|optimise|clean.?up|restructure)\b'; then
+    CAT_CODE=$((CAT_CODE + 7))
 fi
 
 # --- Debug/fix signals ---
@@ -185,6 +184,23 @@ if echo "$TASK_LOWER" | grep -qE '\b(repo|repository|github|gitlab|bitbucket|git
         CAT_DEPLOY=$((CAT_DEPLOY + 6))
         CAT_CONFIG=$((CAT_CONFIG + 4))
     fi
+fi
+
+# ============================================================
+# STEP 1b: POST-PROCESSING — resolve code vs filemod conflicts
+# When strong code signals (refactor, tests, CI) are present,
+# filemod signals from generic verbs (ajoute, modifie) should
+# not override the code category.
+# ============================================================
+if [[ $CAT_CODE -ge 10 && $CAT_FILEMOD -gt 0 && $CAT_FILEMOD -lt $CAT_CODE ]]; then
+    # Strong code signals dominate — suppress filemod
+    CAT_FILEMOD=$((CAT_FILEMOD / 2))
+fi
+
+# When multiple complex categories combine (code+debug, code+architecture),
+# boost architecture if both code and another complex category are strong
+if [[ $CAT_CODE -ge 6 && $CAT_DEBUG -ge 5 ]]; then
+    CAT_ARCHITECTURE=$((CAT_ARCHITECTURE + 3))
 fi
 
 # ============================================================
@@ -401,7 +417,8 @@ MODEL="" MODEL_NAME="" TIMEOUT=10 COST="low"
 if [[ "$REC" == "spawn" ]]; then
     if [[ $COMPLEXITY -ge 3 ]]; then
         MODEL="anthropic/claude-opus-4-6" MODEL_NAME="Opus" COST="high"
-        TIMEOUT=$((ESTIMATED_SECONDS * 3 > 1800 ? 1800 : ESTIMATED_SECONDS * 3))
+        # ×5 multiplier for complex tasks (code/debug/architecture need more time)
+        TIMEOUT=$((ESTIMATED_SECONDS * 5 > 1800 ? 1800 : ESTIMATED_SECONDS * 5))
     else
         MODEL="anthropic/claude-sonnet-4-5" MODEL_NAME="Sonnet" COST="medium"
         TIMEOUT=$((ESTIMATED_SECONDS * 3 > 600 ? 600 : ESTIMATED_SECONDS * 3))
@@ -448,10 +465,20 @@ fi
 
 # Output
 if [[ "$JSON_OUTPUT" == "true" ]]; then
-    # Escape quotes in TASK for JSON
+    # Generate user_message for immediate feedback
+    if [[ "$REC" == "spawn" ]]; then
+        # Truncate task to ~60 chars for the user message
+        TASK_SHORT=$(echo "$TASK" | head -c 60)
+        [[ ${#TASK} -gt 60 ]] && TASK_SHORT="${TASK_SHORT}..."
+        TASK_SHORT_ESCAPED=$(echo "$TASK_SHORT" | sed 's/"/\\"/g')
+        USER_MSG="Ok, je lance un sub-agent ${MODEL_NAME} pour ça (~${ESTIMATED_SECONDS}s)"
+    else
+        USER_MSG=""
+    fi
+    # Escape quotes in fields for JSON
     TASK_ESCAPED=$(echo "$TASK" | sed 's/"/\\"/g' | sed "s/'/\\'/g")
     cat <<EOF
-{"recommendation":"${REC}","model":"${MODEL}","model_name":"${MODEL_NAME}","reasoning":"${REASONING}","command":"${CMD}","timeout_seconds":${TIMEOUT},"estimated_seconds":${ESTIMATED_SECONDS},"estimated_cost":"${COST}","complexity":"${COMPLEXITY_NAME}","category":"${DOMINANT}","protection_mode":$([[ "$PROTECTION" == "true" ]] && echo true || echo false),"protection_mode_override":$([[ "$PROT_OVERRIDE" == "true" ]] && echo true || echo false),"label":"${LABEL}","dry_run":$([[ "$DRY_RUN" == "true" ]] && echo true || echo false),"user_message":"${TASK_ESCAPED}"}
+{"recommendation":"${REC}","model":"${MODEL}","model_name":"${MODEL_NAME}","reasoning":"${REASONING}","command":"${CMD}","timeout_seconds":${TIMEOUT},"estimated_seconds":${ESTIMATED_SECONDS},"estimated_cost":"${COST}","complexity":"${COMPLEXITY_NAME}","category":"${DOMINANT}","protection_mode":$([[ "$PROTECTION" == "true" ]] && echo true || echo false),"protection_mode_override":$([[ "$PROT_OVERRIDE" == "true" ]] && echo true || echo false),"label":"${LABEL}","dry_run":$([[ "$DRY_RUN" == "true" ]] && echo true || echo false),"user_message":"${USER_MSG}"}
 EOF
 else
     echo ""
