@@ -1,144 +1,110 @@
 #!/bin/bash
-# test-router.sh — Unit tests for task-router.sh
+# test-router.sh — Tests for get-recommended-model.sh and check-protection-mode.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROUTER="${SCRIPT_DIR}/../scripts/task-router.sh"
+ROUTER="$SCRIPT_DIR/../get-recommended-model.sh"
+CHECK_PROT="$SCRIPT_DIR/../check-protection-mode.sh"
 
-PASSED=0
-FAILED=0
-
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
+PASS=0 FAIL=0
 
 assert_eq() {
-    local test_name="$1"
-    local expected="$2"
-    local actual="$3"
-    
-    if [[ "$expected" == "$actual" ]]; then
-        echo -e "${GREEN}✅ PASS${NC}: ${test_name}"
-        PASSED=$((PASSED + 1))
+    local test_name="$1" expected="$2" actual="$3"
+    if [[ "$actual" == "$expected" ]]; then
+        echo "  ✅ $test_name"
+        PASS=$((PASS + 1))
     else
-        echo -e "${RED}❌ FAIL${NC}: ${test_name}"
-        echo "  Expected: ${expected}"
-        echo "  Actual:   ${actual}"
-        FAILED=$((FAILED + 1))
+        echo "  ❌ $test_name — expected '$expected', got '$actual'"
+        FAIL=$((FAIL + 1))
     fi
 }
 
-assert_contains() {
-    local test_name="$1"
-    local expected="$2"
-    local actual="$3"
-    
-    if echo "$actual" | grep -q "$expected"; then
-        echo -e "${GREEN}✅ PASS${NC}: ${test_name}"
-        PASSED=$((PASSED + 1))
-    else
-        echo -e "${RED}❌ FAIL${NC}: ${test_name}"
-        echo "  Expected to contain: ${expected}"
-        echo "  Actual: ${actual}"
-        FAILED=$((FAILED + 1))
-    fi
-}
-
-echo "=== Task Router Tests ==="
+# ============================================================
+echo "=== get-recommended-model.sh ==="
 echo ""
 
-# Test 1: Simple read → execute_direct
-result=$("$ROUTER" --task "Read HEARTBEAT.md" --json)
-rec=$(echo "$result" | jq -r '.recommendation')
-assert_eq "Simple read → execute_direct" "execute_direct" "$rec"
-
-# Test 2: Create skills → spawn + Opus
-result=$("$ROUTER" --task "Create 6 skills and publish on GitHub" --json)
-model=$(echo "$result" | jq -r '.model')
-assert_eq "Create skills → Opus" "anthropic/claude-opus-4-6" "$model"
-
-# Test 3: Protection mode → Force Sonnet
-result=$(PROTECTION_MODE=true "$ROUTER" --task "Build and deploy the application" --json)
-model=$(echo "$result" | jq -r '.model')
-assert_eq "Protection mode → Force Sonnet" "anthropic/claude-sonnet-4-5" "$model"
-
-# Test 4: Protection mode override flag
-result=$(PROTECTION_MODE=true "$ROUTER" --task "Debug complex authentication bug" --json)
-override=$(echo "$result" | jq -r '.protection_mode_override')
-assert_eq "Protection mode sets override flag" "true" "$override"
-
-# Test 5: Write task → spawn + Sonnet
-result=$("$ROUTER" --task "Write documentation for the API" --json)
-model=$(echo "$result" | jq -r '.model')
-assert_eq "Write docs → Sonnet" "anthropic/claude-sonnet-4-5" "$model"
-
-# Test 6: Check status → execute_direct
-result=$("$ROUTER" --task "Check git status" --json)
-rec=$(echo "$result" | jq -r '.recommendation')
-assert_eq "Check status → execute_direct" "execute_direct" "$rec"
-
-# Test 7: Complex multi-step → spawn
-result=$("$ROUTER" --task "Refactor the authentication module and then deploy it" --json)
-rec=$(echo "$result" | jq -r '.recommendation')
-assert_eq "Complex multi-step → spawn" "spawn" "$rec"
-
-# Test 8: Label generation
-result=$("$ROUTER" --task "Create a new skill" --json)
-label=$(echo "$result" | jq -r '.label')
-assert_contains "Label is non-empty" "create" "$label"
-
-# Test 9: Timeout is numeric
-result=$("$ROUTER" --task "Build the frontend" --json)
-timeout=$(echo "$result" | jq -r '.timeout_seconds')
-assert_eq "Timeout is numeric" "true" "$([[ "$timeout" =~ ^[0-9]+$ ]] && echo true || echo false)"
-
-# Test 10: JSON output is valid
-result=$("$ROUTER" --task "List files" --json)
-valid=$(echo "$result" | jq -r 'type' 2>/dev/null || echo "invalid")
-assert_eq "JSON output is valid" "object" "$valid"
-
-# Test 11: Dry run flag
-result=$("$ROUTER" --task "Deploy to production" --json --dry-run)
-dry_run=$(echo "$result" | jq -r '.dry_run')
-assert_eq "Dry run flag set" "true" "$dry_run"
-
-# Test 12: Cost estimation present
-result=$("$ROUTER" --task "Audit security vulnerabilities" --json)
-cost=$(echo "$result" | jq -r '.estimated_cost')
-assert_contains "Cost is set" "$cost" "low medium high"
-
-echo ""
-echo "=== Priority Keyword Detection Tests ==="
+# --- Direct responses (≤ 30s always direct) ---
+echo "— Short duration (≤ 30s) → always direct"
+assert_eq "simple/10s"  "direct" "$($ROUTER --complexity 1 --duration 10)"
+assert_eq "normal/20s"  "direct" "$($ROUTER --complexity 2 --duration 20)"
+assert_eq "complex/30s" "direct" "$($ROUTER --complexity 3 --duration 30)"
+assert_eq "simple/0s"   "direct" "$($ROUTER --complexity 1 --duration 0)"
 echo ""
 
-# Test 13: "List all active subagents" → execute_direct
-result=$("$ROUTER" --task "List all active subagents" --json)
-rec=$(echo "$result" | jq -r '.recommendation')
-assert_eq "List all active subagents → execute_direct" "execute_direct" "$rec"
-
-# Test 14: "Show current status" → execute_direct
-result=$("$ROUTER" --task "Show current status" --json)
-rec=$(echo "$result" | jq -r '.recommendation')
-assert_eq "Show current status → execute_direct" "execute_direct" "$rec"
-
-# Test 15: "Check if service is running" → execute_direct
-result=$("$ROUTER" --task "Check if service is running" --json)
-rec=$(echo "$result" | jq -r '.recommendation')
-assert_eq "Check if service is running → execute_direct" "execute_direct" "$rec"
-
-# Test 16: "List and fix all bugs" → spawn (fix outweighs list)
-result=$("$ROUTER" --task "List and fix all bugs" --json)
-rec=$(echo "$result" | jq -r '.recommendation')
-assert_eq "List and fix all bugs → spawn" "spawn" "$rec"
-
-echo ""
-echo "=== Results ==="
-echo -e "Passed: ${GREEN}${PASSED}${NC}"
-echo -e "Failed: ${RED}${FAILED}${NC}"
+# --- Medium duration (31-120s) ---
+echo "— Medium duration (31-120s)"
+assert_eq "simple/60s → direct"  "direct" "$($ROUTER --complexity 1 --duration 60)"
+assert_eq "simple/120s → direct" "direct" "$($ROUTER --complexity 1 --duration 120)"
+assert_eq "normal/60s → sonnet"  "sonnet" "$($ROUTER --complexity 2 --duration 60)"
+assert_eq "normal/120s → sonnet" "sonnet" "$($ROUTER --complexity 2 --duration 120)"
+assert_eq "complex/60s → opus"   "opus"   "$($ROUTER --complexity 3 --duration 60)"
+assert_eq "complex/120s → opus"  "opus"   "$($ROUTER --complexity 3 --duration 120)"
 echo ""
 
-if [[ $FAILED -gt 0 ]]; then
-    exit 1
+# --- Long duration (> 120s) ---
+echo "— Long duration (> 120s)"
+assert_eq "simple/150s → sonnet"  "sonnet" "$($ROUTER --complexity 1 --duration 150)"
+assert_eq "normal/200s → sonnet"  "sonnet" "$($ROUTER --complexity 2 --duration 200)"
+assert_eq "complex/200s → opus"   "opus"   "$($ROUTER --complexity 3 --duration 200)"
+assert_eq "complex/500s → opus"   "opus"   "$($ROUTER --complexity 3 --duration 500)"
+echo ""
+
+# --- Boundary cases ---
+echo "— Boundary cases"
+assert_eq "normal/31s → sonnet"   "sonnet" "$($ROUTER --complexity 2 --duration 31)"
+assert_eq "complex/31s → opus"    "opus"   "$($ROUTER --complexity 3 --duration 31)"
+assert_eq "simple/121s → sonnet"  "sonnet" "$($ROUTER --complexity 1 --duration 121)"
+echo ""
+
+# --- Protection mode (env var override) ---
+echo "— Protection mode (env override)"
+assert_eq "complex/60s + protection → sonnet"  "sonnet" "$(PROTECTION_MODE=true $ROUTER --complexity 3 --duration 60)"
+assert_eq "complex/200s + protection → sonnet" "sonnet" "$(PROTECTION_MODE=true $ROUTER --complexity 3 --duration 200)"
+assert_eq "normal/60s + protection → sonnet"   "sonnet" "$(PROTECTION_MODE=true $ROUTER --complexity 2 --duration 60)"
+assert_eq "simple/60s + protection → direct"   "direct" "$(PROTECTION_MODE=true $ROUTER --complexity 1 --duration 60)"
+assert_eq "simple/10s + protection → direct"   "direct" "$(PROTECTION_MODE=true $ROUTER --complexity 1 --duration 10)"
+echo ""
+
+# --- Error cases ---
+echo "— Error handling"
+if $ROUTER --complexity 0 --duration 10 2>/dev/null; then
+    echo "  ❌ complexity 0 should fail"
+    FAIL=$((FAIL + 1))
+else
+    echo "  ✅ complexity 0 rejected"
+    PASS=$((PASS + 1))
 fi
-echo "All tests passed! ✅"
+
+if $ROUTER --complexity 4 --duration 10 2>/dev/null; then
+    echo "  ❌ complexity 4 should fail"
+    FAIL=$((FAIL + 1))
+else
+    echo "  ✅ complexity 4 rejected"
+    PASS=$((PASS + 1))
+fi
+echo ""
+
+# ============================================================
+echo "=== check-protection-mode.sh ==="
+echo ""
+
+# With env var
+assert_eq "PROTECTION_MODE=true" "true" "$(PROTECTION_MODE=true $CHECK_PROT)"
+
+# Without env var (reads from state file — depends on current state)
+CURRENT=$($CHECK_PROT)
+if [[ "$CURRENT" == "true" || "$CURRENT" == "false" ]]; then
+    echo "  ✅ Returns valid boolean: $CURRENT"
+    PASS=$((PASS + 1))
+else
+    echo "  ❌ Unexpected output: $CURRENT"
+    FAIL=$((FAIL + 1))
+fi
+echo ""
+
+# ============================================================
+echo "========================================="
+echo "Results: $PASS passed, $FAIL failed"
+echo "========================================="
+
+[[ $FAIL -eq 0 ]] && exit 0 || exit 1
