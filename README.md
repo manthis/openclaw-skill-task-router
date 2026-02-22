@@ -3,97 +3,114 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![OpenClaw Skill](https://img.shields.io/badge/OpenClaw-Skill-blue.svg)](https://github.com/manthis/openclaw-skill-task-router)
 
-**Plug-and-play model routing for OpenClaw agents.** Install the skill → agents automatically learn when to handle tasks directly, when to spawn sub-agents, and which model to use.
+Intelligent task routing for OpenClaw — the agent estimates duration and type, this script applies the decision matrix and handles model availability.
 
-## How It Works
-
-The **agent** estimates two things about each incoming task:
-- **Complexity** (1=simple, 2=normal, 3=complex)
-- **Duration** (estimated seconds)
-
-The **scripts** apply a deterministic decision matrix:
-
-```
-              │ Simple (1)    │ Normal (2)     │ Complex (3)
-──────────────┼───────────────┼────────────────┼──────────────
-  ≤ 30s       │ direct        │ direct         │ direct
-  31–120s     │ direct        │ sonnet         │ opus
-  > 120s      │ sonnet        │ sonnet         │ opus
-```
-
-## Install
+## Quick Start
 
 ```bash
-# Clone into skills directory
-git clone https://github.com/manthis/openclaw-skill-task-router.git \
-    ~/.openclaw/workspace/skills/task-router
+git clone https://github.com/manthis/openclaw-skill-task-router.git ~/Projects/openclaw-skill-task-router
+ln -sf ~/Projects/openclaw-skill-task-router/get-recommended-model.sh ~/bin/get-recommended-model.sh
 
-# Make scripts executable
-chmod +x ~/.openclaw/workspace/skills/task-router/*.sh
+# Use it
+get-recommended-model.sh --duration 10
+# direct
 
-# Optional: symlink for CLI access
-ln -sf ~/.openclaw/workspace/skills/task-router/get-recommended-model.sh ~/bin/get-recommended-model.sh
-ln -sf ~/.openclaw/workspace/skills/task-router/check-protection-mode.sh ~/bin/check-protection-mode.sh
+get-recommended-model.sh --duration 90 --type code --json
+# { "recommendation": "codex", "ask_user": true, ... }
 ```
 
-That's it. The agent reads `SKILL.md` and knows what to do.
+## Decision Matrix
+
+```
+Duration < 30s                → direct
+Duration ≥ 30s + normal       → sonnet
+Duration ≥ 30s + code         → model availability logic:
+  Codex + Opus available       → codex  (ask user to confirm or switch to Opus)
+  Only Codex available         → codex  (no confirmation needed)
+  Only Opus available          → opus   (no confirmation needed)
+  Neither available            → qwen-coder (fallback)
+```
+
+**Code-type tasks**: code writing, debugging, architecture, refactoring.  
+**Normal tasks**: everything else (content, research, config, deploy...).
+
+## Model Availability
+
+Tracked in `~/.openclaw/state/model-limits.json`:
+
+```json
+{
+  "codex": { "last_429": 1740000000, "cooldown_until": 1740000600 },
+  "opus":  { "last_429": 0, "cooldown_until": 0 }
+}
+```
+
+Cooldown = **10 minutes** after a 429 error. The router checks this before every code task.
 
 ## Usage
 
 ```bash
-# Get model recommendation
-get-recommended-model.sh --complexity 3 --duration 120
-# → "opus"
+get-recommended-model.sh [OPTIONS]
 
-get-recommended-model.sh --complexity 2 --duration 60
-# → "sonnet"
-
-get-recommended-model.sh --complexity 1 --duration 10
-# → "direct"
-
-# Check protection mode
-check-protection-mode.sh
-# → "false"
+Options:
+  --duration <seconds>   Estimated task duration (required)
+  --type <code|normal>   Task type: 'code' for code/debug/arch, 'normal' for rest (default: normal)
+  --json                 Output as JSON with extra fields
+  -h, --help             Show help
 ```
 
-## Protection Mode
+## JSON Output Fields
 
-When weekly Claude usage exceeds 50% of budget, protection mode activates automatically. The routing script reads `memory/claude-usage-state.json` and downgrades Opus → Sonnet.
+| Field | Description |
+|-------|-------------|
+| `recommendation` | `direct`, `sonnet`, `codex`, `opus`, or `qwen-coder` |
+| `model_id` | Full model ID |
+| `ask_user` | `true` when both Codex & Opus available → ask user to confirm or switch |
+| `model_selection` | `both_available`, `codex_only`, `opus_only`, `fallback_qwen`, `normal`, `fast` |
+| `codex_available` | Whether Codex is off cooldown |
+| `opus_available` | Whether Opus is off cooldown |
+| `protection_mode` | Whether budget protection is active (Opus → Sonnet) |
+
+## Examples
 
 ```bash
-# Force protection mode
-PROTECTION_MODE=true get-recommended-model.sh --complexity 3 --duration 120
-# → "sonnet" (instead of "opus")
+# Fast task → direct
+get-recommended-model.sh --duration 10
+# direct
+
+# Content task → Sonnet
+get-recommended-model.sh --duration 60 --type normal
+# sonnet
+
+# Code task, both models available → Codex + ask user
+get-recommended-model.sh --duration 90 --type code --json
+# { "recommendation": "codex", "ask_user": true, "model_selection": "both_available" }
+
+# Code task, Codex on cooldown → Opus
+get-recommended-model.sh --duration 90 --type code --json
+# { "recommendation": "opus", "ask_user": false, "model_selection": "opus_only" }
+
+# Code task, both on cooldown → Qwen Coder
+get-recommended-model.sh --duration 90 --type code --json
+# { "recommendation": "qwen-coder", "model_selection": "fallback_qwen" }
+
+# Protection mode active → Opus replaced by Sonnet
+PROTECTION_MODE=true get-recommended-model.sh --duration 90 --type code --json
+# { "recommendation": "sonnet", "protection_mode": true }
 ```
 
-## Agent Instructions
+## Orchestration Workflow
 
-All routing guidelines, complexity estimation rules, duration estimates, and annotated examples are in **[SKILL.md](SKILL.md)**. This is what the agent reads to learn the routing behavior — no configuration needed.
+When `ask_user=true` (both models available):
+1. Send user: *"Tâche code détectée. Je propose Codex — veux-tu Opus à la place ?"*
+2. Wait for confirmation
+3. Spawn with confirmed model
 
-## Tests
+When `ask_user=false` + `recommendation != direct`:
+1. Send user: *"Ok, je lance [model] pour cette tâche (~Xs)"*
+2. Spawn immediately
+3. Send result when done
 
-```bash
-./tests/test-router.sh
-```
+## Other Scripts
 
-## Files
-
-```
-skills/task-router/
-├── SKILL.md                    # Agent instructions (the brain)
-├── README.md                   # This file
-├── get-recommended-model.sh    # complexity × duration → model
-├── check-protection-mode.sh    # Protection mode check
-├── tests/
-│   └── test-router.sh          # Automated tests
-└── LICENSE
-```
-
-## Dependencies
-
-- `bash` (4.0+)
-- `jq`
-
-## License
-
-MIT
+- **`check-protection-mode.sh`** — checks if budget protection is active

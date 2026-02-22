@@ -18,13 +18,16 @@ User message arrives
     ├─ Can you answer in < 30s without tools or with a quick tool call?
     │   └─ YES → Respond directly. Done.
     │
-    └─ NO → Estimate complexity (1-3) and duration (seconds)
+    └─ NO → Estimate duration (seconds) and type (code|normal)
             │
-            └─ Run: get-recommended-model.sh --complexity N --duration S
+            └─ Run: get-recommended-model.sh --duration S --type code|normal [--json]
                     │
-                    ├─ "direct"  → Handle it yourself
-                    ├─ "sonnet"  → Spawn sub-agent with anthropic/claude-sonnet-4-5
-                    └─ "opus"    → Spawn sub-agent with anthropic/claude-opus-4-6
+                    ├─ "direct"      → Handle it yourself
+                    ├─ "sonnet"      → Spawn sub-agent with anthropic/claude-sonnet-4-6
+                    ├─ "codex"       → Spawn sub-agent with openai-codex/gpt-5.3-codex
+                    │                  (if ask_user=true: confirm with user first)
+                    ├─ "opus"        → Spawn sub-agent with anthropic/claude-opus-4-6
+                    └─ "qwen-coder"  → Fallback when both Codex & Opus are on cooldown
 ```
 
 **Always give immediate feedback** when spawning: tell the user what you're doing, which model, and estimated time. Don't make them wait in silence.
@@ -136,54 +139,72 @@ Add time for these patterns:
 
 ---
 
-## Step 3: Get the Recommendation
+## Step 3: Identify Task Type
 
-Run the script:
+**Is this a code-type task?**
+
+- **`code`** → writing code, debugging, architecture, refactoring, implementing features
+- **`normal`** → everything else: content, research, config, deploy, file edits, questions
+
+## Step 4: Get the Recommendation
+
+Run the script with `--json` to get full details:
 
 ```bash
-get-recommended-model.sh --complexity <1|2|3> --duration <seconds>
+get-recommended-model.sh --duration <seconds> --type <code|normal> --json
 ```
-
-Output is one word: `direct`, `sonnet`, or `opus`.
 
 ### The Decision Matrix
 
 ```
-              │ Simple (1)    │ Normal (2)     │ Complex (3)
-──────────────┼───────────────┼────────────────┼──────────────
-  ≤ 30s       │ direct        │ direct         │ direct
-  31–120s     │ direct        │ sonnet         │ opus
-  > 120s      │ sonnet        │ sonnet         │ opus
+Duration < 30s                → direct
+Duration ≥ 30s + normal       → sonnet
+Duration ≥ 30s + code         → model availability logic:
+  Codex + Opus available       → codex  (ask_user=true: confirm with user)
+  Only Codex available         → codex
+  Only Opus available          → opus
+  Neither available            → qwen-coder
 ```
 
 ### What Each Recommendation Means
 
-- **direct** → Handle the task yourself, in the current session. No spawn.
-- **sonnet** → Spawn a sub-agent using `anthropic/claude-sonnet-4-5`. Good for content, search, edits, deploys.
-- **opus** → Spawn a sub-agent using `anthropic/claude-opus-4-6`. For complex code, debugging, architecture.
+- **direct** → Handle the task yourself. No spawn.
+- **sonnet** → Spawn with `anthropic/claude-sonnet-4-6`. Content, research, edits, deploys.
+- **codex** → Spawn with `openai-codex/gpt-5.3-codex`. Code tasks (default for code).
+- **opus** → Spawn with `anthropic/claude-opus-4-6`. Code tasks when Codex is unavailable.
+- **qwen-coder** → Spawn with `qwen-portal/coder-model`. Fallback when both Codex & Opus on cooldown.
+
+### ask_user Field
+
+When `ask_user=true` in JSON output (both Codex & Opus available):
+- Tell the user: *"Tâche code détectée. Je propose Codex — veux-tu Opus à la place ?"*
+- Wait for their response before spawning
+
+When `ask_user=false`: spawn immediately without confirmation.
 
 ### Timeout Calculation
 
-When spawning, set a timeout:
 - **Sonnet**: `duration × 3` (cap at 600s)
-- **Opus**: `duration × 5` (cap at 1800s)
+- **Codex/Opus**: `duration × 3` (cap at 1800s)
 
 ---
 
-## Step 4: Act on the Recommendation
+## Step 5: Act on the Recommendation
 
 ### If "direct"
 Just do it. No spawn needed.
 
-### If "sonnet" or "opus"
+### If any other model
 
 1. **Immediately tell the user** what you're doing:
-   > "Je lance un sub-agent Sonnet pour [résumé tâche] (~60s)"
-   > "Spawning an Opus sub-agent for [task summary] (~120s)"
+   > "Je lance un sub-agent Codex pour [résumé tâche] (~90s)"
+   > "Spawning a Sonnet sub-agent for [task] (~60s)"
 
-2. **Spawn** with the recommended model.
+2. **If ask_user=true**: ask the user to confirm Codex or switch to Opus before spawning.
 
-3. **When the sub-agent completes**, relay the result. Don't repeat the announcement.
+3. **Spawn** with the recommended model.
+
+4. **When the sub-agent completes**, relay the result. Don't repeat the announcement.
 
 ---
 
